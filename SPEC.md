@@ -357,6 +357,11 @@ everything.
   list. Checking what just went past is the common case, and sending the user
   to a 900-point window for it is friction. The window stays one click away
   from that page, for what 320 points cannot do: filtering and export.
+  A click anywhere else closes the popover, including in another application.
+- Right click (and control-click): a plain `NSMenu` — Journal, Policy, reinstall,
+  and **Quit mcpwall with its ⌘Q**. A menu, not a second popover: it is what
+  macOS users expect from a status item, it is keyboard navigable, and quitting
+  is the one thing someone must never have to hunt for.
 - **Decision prompt**: definitely not an `NSPopover` (it closes on focus loss and
   does not show above a full-screen terminal). Use an `NSPanel` with
   `level = .statusBar`, a `collectionBehavior` including `.canJoinAllSpaces` and
@@ -588,6 +593,25 @@ fit in 320 points, and a popover you scroll sideways is worse than none. The
 window keeps what a narrow column genuinely cannot do: filtering and JSONL
 export. Reading is now off the main thread, because spawning `mcpwall log` on it
 stuttered the popover's opening animation — precisely when the user is looking.
+
+**2026-07-27 — Dismissing the popover needs a global monitor, and the toggle
+needs a guard.** Two separate defects behind one symptom. `.transient` only
+reacts to clicks inside our own application; mcpwall is an accessory app, so the
+click that should dismiss the bubble almost always lands in another one, where
+AppKit never tells the popover. Hence an `NSEvent` global monitor on mouse-down
+(mouse events need no accessibility permission, unlike keyboard ones). And
+because a transient popover dismisses itself on the mouse *down* that reaches the
+status item while the button's action arrives on the mouse *up*, the click meant
+to close the bubble found `isShown == false` and reopened it — so an open that
+lands within 200 ms of a close is ignored.
+
+**2026-07-27 — The right click is a menu, not a second popover.** For a handful
+of one-shot commands, `NSMenu` is what macOS users expect from a status item, it
+is keyboard navigable, and it carries the ⌘Q. Control-click routes to the same
+place: without it the menu is unreachable for anyone who has not enabled
+secondary click. `statusItem.menu` is set and cleared around `performClick`
+rather than using `NSMenu.popUp`, because that is what highlights the icon while
+the menu is up — leaving it set would make the left click show the menu for ever.
 
 **2026-07-27 — The bundle is assembled by hand, with no Xcode project.** Builds
 identically in CI and on a machine that has only the Command Line Tools. The

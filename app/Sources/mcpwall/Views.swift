@@ -16,16 +16,9 @@ struct PopoverView: View {
     @ObservedObject var model: AppModel
     let actions: PopoverActions
 
-    private enum Page {
-        case home
-        case journal
-    }
-
-    @State private var page: Page = .home
-
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            switch page {
+            switch model.popoverPage {
             case .home:
                 header
                 Divider()
@@ -36,7 +29,7 @@ struct PopoverView: View {
                 footer
             case .journal:
                 PopoverJournalView(
-                    onBack: { page = .home },
+                    onBack: { model.popoverPage = .home },
                     onOpenWindow: actions.openJournal
                 )
             }
@@ -127,7 +120,7 @@ struct PopoverView: View {
             }
 
             HStack(spacing: 8) {
-                Button("Journal") { page = .journal }
+                Button("Journal") { model.popoverPage = .journal }
                 Button("Policy", action: actions.openPolicy)
                 Spacer()
                 Menu {

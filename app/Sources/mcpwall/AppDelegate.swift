@@ -29,6 +29,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var journalWindow: NSWindow?
     private var onboardingWindow: NSWindow?
 
+    /// Watches for clicks landing in *other* applications while the popover is
+    /// open. See `showPopover`.
+    private var outsideClickMonitor: Any?
+
+    /// When the popover last closed.
+    ///
+    /// A `.transient` popover dismisses itself on the mouse *down* that lands on
+    /// the status item; the button's action only arrives on the mouse *up*, and
+    /// finds `isShown == false`. Without this, the click meant to close the
+    /// bubble reopens it instead and the icon stops being a toggle.
+    private var popoverClosedAt = Date.distantPast
+
     private let model = AppModel()
 
     static func main() {
@@ -85,11 +97,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         refreshIcon()
 
-        statusItem.button?.action = #selector(togglePopover)
+        statusItem.button?.action = #selector(statusItemClicked)
         statusItem.button?.target = self
+        // Without this, only the left button sends the action and a right click
+        // does nothing at all.
+        statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
 
         popover = NSPopover()
         popover.behavior = .transient
+        popover.delegate = self
 
         // No hard-coded `contentSize`: the size comes from SwiftUI, and
         // `sizingOptions` is what makes that happen. Without it the hosting
@@ -124,15 +140,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         button.title = model.status.blockedToday > 0 ? " \(model.status.blockedToday)" : ""
     }
 
-    @objc private func togglePopover() {
+    @objc private func statusItemClicked() {
         guard let button = statusItem.button else { return }
-        if popover.isShown {
+
+        // Control-click is the trackpad equivalent of a right click and must
+        // behave the same, otherwise the menu is unreachable for anyone who has
+        // not enabled secondary click.
+        let event = NSApp.currentEvent
+        let secondary = event?.type == .rightMouseUp
+            || event?.modifierFlags.contains(.control) == true
+
+        if secondary {
+            showStatusMenu(from: button)
+        } else if popover.isShown {
             popover.performClose(nil)
-        } else {
-            connection.requestStatus()
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        } else if Date().timeIntervalSince(popoverClosedAt) > 0.2 {
+            showPopover(from: button)
+        }
+        // Otherwise the popover has just dismissed itself on this very click:
+        // there is nothing to do, and reopening would undo what the user asked
+        // for.
+    }
+
+    private func showPopover(from button: NSStatusBarButton) {
+        connection.requestStatus()
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+
+        // `.transient` only reacts to clicks inside our own application, and
+        // mcpwall is an accessory app: the click that should dismiss the
+        // popover almost always lands in another one, where AppKit never tells
+        // the popover about it. Hence a global monitor.
+        //
+        // Mouse events need no accessibility permission — unlike keyboard
+        // events, which is why we watch only for clicks.
+        outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        ) { [weak self] _ in
+            self?.popover.performClose(nil)
         }
     }
+
+    /// The right-click menu.
+    ///
+    /// Deliberately not a second popover: for a handful of one-shot commands, a
+    /// menu is what macOS users expect from a status item, it is keyboard
+    /// navigable, and it carries the ⌘Q that people look for when they want out.
+    private func showStatusMenu(from button: NSStatusBarButton) {
+        if popover.isShown { popover.performClose(nil) }
+
+        let menu = NSMenu()
+        menu.addItem(item("Journal…", #selector(menuOpenJournal)))
+        menu.addItem(item("Policy…", #selector(menuOpenPolicy)))
+        menu.addItem(item("Reinstall into MCP clients…", #selector(menuRunOnboarding)))
+        menu.addItem(.separator())
+        menu.addItem(item("Quit mcpwall", #selector(menuQuit), key: "q"))
+
+        // Going through `statusItem.menu` rather than `NSMenu.popUp` is what
+        // highlights the icon while the menu is up. It has to be cleared
+        // straight after, or the left click would stop opening the popover and
+        // show this menu instead for ever.
+        statusItem.menu = menu
+        button.performClick(nil)
+        statusItem.menu = nil
+    }
+
+    private func item(_ title: String, _ action: Selector, key: String = "") -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+        item.target = self
+        return item
+    }
+
+    @objc private func menuOpenJournal() { showJournal() }
+    @objc private func menuOpenPolicy() { NSWorkspace.shared.open(Paths.policy) }
+    @objc private func menuRunOnboarding() { showOnboarding() }
+    @objc private func menuQuit() { NSApp.terminate(nil) }
 
     // MARK: - Daemon messages
 
@@ -260,11 +341,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+extension AppDelegate: NSPopoverDelegate {
+    /// One place to clean up, whatever closed the popover — an outside click,
+    /// Escape, or our own code opening a window.
+    func popoverDidClose(_ notification: Notification) {
+        popoverClosedAt = Date()
+
+        if let monitor = outsideClickMonitor {
+            NSEvent.removeMonitor(monitor)
+            outsideClickMonitor = nil
+        }
+        // Reopening lands on the dashboard. Dropping someone back into a
+        // journal page they opened ten minutes ago is not where they expect to
+        // be.
+        model.popoverPage = .home
+    }
+}
+
+/// Which page the popover shows.
+///
+/// Held on the model rather than in a SwiftUI `@State`, because the hosting
+/// controller outlives any single showing of the popover: the delegate has to
+/// be able to reset it from the outside when the bubble closes.
+enum PopoverPage {
+    case home
+    case journal
+}
+
 /// State shared with the views.
 final class AppModel: ObservableObject {
     @Published var status = Status()
     @Published var daemonConnected = false
     @Published var recent: [Prompt] = []
+    @Published var popoverPage: PopoverPage = .home
 }
 
 struct PopoverActions {
