@@ -678,6 +678,47 @@ fn prefix(s: &str) -> String {
     s.chars().take(6).collect()
 }
 
+/// Ajoute un override permanent au fichier de politique.
+///
+/// Écriture par ajout textuel plutôt que par réécriture du document : un
+/// `policy.yaml` est un fichier que l'utilisateur édite à la main, avec ses
+/// commentaires et son ordre de règles. Le relire, le sérialiser et le
+/// réécrire lui ferait perdre les deux — et la première fois que mcpwall
+/// détruit les commentaires de quelqu'un, il perd sa confiance.
+pub fn append_override(path: &Path, scope_key: &str, tool: &str, allow: bool) -> Result<()> {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("lecture de {}", path.display()))?;
+
+    // On valide avant d'écrire : mieux vaut refuser d'enregistrer une décision
+    // que de produire un fichier que le daemon ne saura plus relire.
+    Policy::parse(&text).context("politique existante illisible, override non ajouté")?;
+
+    let action = if allow { "allow" } else { "deny" };
+    let entry = format!(
+        "  - scope: \"{}\"\n    tool: \"{}\"\n    action: {action}\n    until: forever\n",
+        scope_key.replace('"', "\\\""),
+        tool.replace('"', "\\\"")
+    );
+
+    let mut updated = if text.contains("\noverrides:") || text.starts_with("overrides:") {
+        // `overrides: []` doit devenir une liste ouverte avant qu'on y ajoute.
+        text.replace("overrides: []", "overrides:")
+    } else {
+        format!("{}\noverrides:\n", text.trim_end())
+    };
+
+    if !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str(&entry);
+
+    // Relecture de contrôle : on n'écrit pas un fichier qu'on vient de casser.
+    Policy::parse(&updated).context("l'ajout aurait produit une politique invalide")?;
+
+    std::fs::write(path, updated).with_context(|| format!("écriture de {}", path.display()))?;
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub struct Decision {
     pub action: Action,

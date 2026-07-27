@@ -25,16 +25,25 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use crate::ipc::{DecideRequest, DecideResponse, Hello, Outcome};
+use crate::ipc::{ClientMessage, DecideRequest, DecideResponse, Hello, Outcome, ServerMessage};
 use crate::mcp::{CallContext, DecisionError, DecisionPoint, Verdict};
 use crate::scope::Scope;
 
-/// Délai au-delà duquel on cesse d'attendre un verdict.
+/// Délai d'attente d'un verdict quand le daemon n'annonce rien.
 ///
-/// Un daemon lent est un daemon en panne du point de vue de l'agent : au-delà,
-/// on préfère laisser passer que suspendre son outil. Le timeout couvre aussi
-/// le cas du daemon vivant mais bloqué, que le handshake ne détecte pas.
-const DECIDE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Filet de sécurité pour un daemon vivant mais bloqué, cas que le handshake ne
+/// détecte pas. Il ne doit **jamais** être plus court que le temps qu'un
+/// utilisateur met à répondre à une demande de confirmation : abandonner trop
+/// tôt fait passer l'appel, donc transforme une règle `ask` en `allow` dès que
+/// la personne réfléchit. D'où la dérivation à partir du délai annoncé par le
+/// daemon dans son hello, et cette valeur seulement en dernier recours.
+const FALLBACK_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Marge ajoutée au délai annoncé par le daemon.
+///
+/// Le daemon garantit une réponse dans son propre délai ; la marge couvre le
+/// trajet et l'ordonnancement, pas l'hésitation de l'utilisateur.
+const TIMEOUT_MARGIN: Duration = Duration::from_secs(30);
 
 type Pending = (DecideRequest, mpsc::Sender<Option<DecideResponse>>);
 
@@ -47,6 +56,8 @@ pub struct DaemonClient {
     degraded: AtomicBool,
     fail_closed: bool,
     session: SessionInfo,
+    /// Dérivé du hello du daemon.
+    timeout: Duration,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -89,10 +100,16 @@ impl DaemonClient {
                 return None;
             }
         };
-        stream.set_read_timeout(Some(DECIDE_TIMEOUT)).ok()?;
-        stream.set_write_timeout(Some(DECIDE_TIMEOUT)).ok()?;
+        // Court pendant le handshake : un daemon qui n'y répond pas est mort,
+        // il n'y a personne à attendre. Le délai est rallongé juste après, une
+        // fois qu'on sait combien de temps un verdict peut prendre.
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .ok()?;
 
         let mut write = stream.try_clone().ok()?;
+        let stream_ref = stream.try_clone().ok()?;
         let mut lines = BufReader::new(stream).lines();
 
         let mine = Hello::default();
@@ -115,6 +132,15 @@ impl DaemonClient {
             return None;
         }
 
+        // Le daemon annonce le temps qu'il peut mettre à répondre — il attend
+        // l'utilisateur, pas la machine. Abandonner avant lui ferait passer
+        // l'appel en silence.
+        let timeout = peer
+            .ask_timeout_seconds
+            .map(|s| Duration::from_secs(s) + TIMEOUT_MARGIN)
+            .unwrap_or(FALLBACK_TIMEOUT);
+        stream_ref.set_read_timeout(Some(timeout)).ok()?;
+
         let (tx, rx) = mpsc::channel::<Pending>();
 
         // Un seul thread possède la connexion : les requêtes sont sérialisées
@@ -124,11 +150,26 @@ impl DaemonClient {
             .spawn(move || {
                 for (req, reply) in rx {
                     let response = (|| {
-                        let payload = serde_json::to_string(&req).ok()?;
+                        let msg = ClientMessage::Decide(Box::new(req));
+                        let payload = serde_json::to_string(&msg).ok()?;
                         writeln!(write, "{payload}").ok()?;
                         write.flush().ok()?;
+
+                        // Le shim ne s'abonne pas aux demandes de confirmation :
+                        // tout ce qui n'est pas un verdict sur cette connexion
+                        // est une anomalie de protocole, pas un message à
+                        // interpréter au mieux.
                         let line = lines.next()?.ok()?;
-                        serde_json::from_str::<DecideResponse>(&line).ok()
+                        match serde_json::from_str::<ServerMessage>(&line).ok()? {
+                            ServerMessage::Verdict(v) => Some(v),
+                            other => {
+                                tracing::warn!(
+                                    reçu = ?std::mem::discriminant(&other),
+                                    "message inattendu à la place d'un verdict"
+                                );
+                                None
+                            }
+                        }
                     })();
 
                     let failed = response.is_none();
@@ -145,6 +186,7 @@ impl DaemonClient {
             degraded: AtomicBool::new(false),
             fail_closed,
             session,
+            timeout,
         })
     }
 
@@ -186,7 +228,7 @@ impl DecisionPoint for DaemonClient {
             return Err(self.error("connexion au daemon fermée"));
         }
 
-        let response = match rx.recv_timeout(DECIDE_TIMEOUT) {
+        let response = match rx.recv_timeout(self.timeout) {
             Ok(Some(r)) => r,
             Ok(None) => {
                 self.degraded.store(true, Ordering::Relaxed);
@@ -208,6 +250,9 @@ impl DecisionPoint for DaemonClient {
     }
 }
 
-pub fn decide_timeout() -> Duration {
-    DECIDE_TIMEOUT
+impl DaemonClient {
+    /// Délai effectif, dérivé du hello du daemon.
+    pub fn decide_timeout(&self) -> Duration {
+        self.timeout
+    }
 }

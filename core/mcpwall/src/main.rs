@@ -138,6 +138,7 @@ fn main() -> Result<()> {
             rt.block_on(daemon::run(
                 args.socket.unwrap_or_else(ipc::socket_path),
                 args.policy.unwrap_or_else(ipc::policy_path),
+                db,
             ))
         }
         Command::Init(args) => cmd_init(args),

@@ -28,3 +28,51 @@ jobs:
       # Le benchmark n'assert qu'en release : un binaire de debug mesure le coût
       # des vérifications de débordement, pas celui du produit.
       - run: cargo test --release --test bench -- --nocapture
+
+  app:
+    name: app macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+
+      # Les runners macOS ont Xcode : contrairement à une machine n'ayant que
+      # les Command Line Tools, le build universel y fonctionne.
+      - run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: Compiler l'app
+        working-directory: app
+        run: swift build -c release
+
+      - name: Assembler le bundle
+        run: ./scripts/build-app.sh
+
+      # Vérifie ce qui n'est pas vérifiable sur une machine sans Xcode : que les
+      # deux binaires du bundle sont bien universels. Un .dmg arm64 seul ne
+      # démarrerait pas sur une machine Intel, et on ne s'en apercevrait qu'après
+      # publication.
+      - name: Vérifier les architectures
+        run: |
+          set -euo pipefail
+          for binaire in \
+              build/mcpwall.app/Contents/MacOS/mcpwall \
+              build/mcpwall.app/Contents/Resources/mcpwall; do
+              archs="$(lipo -archs "$binaire")"
+              echo "$binaire : $archs"
+              case "$archs" in
+                  *arm64*) ;;
+                  *) echo "::error::$binaire n'est pas compilé pour arm64"; exit 1 ;;
+              esac
+              case "$archs" in
+                  *x86_64*) ;;
+                  *) echo "::error::$binaire n'est pas compilé pour x86_64"; exit 1 ;;
+              esac
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mcpwall-app-non-signe
+          path: build/mcpwall.app
+          # Non signé et non notarisé : utilisable pour tester, pas pour
+          # distribuer. Voir scripts/sign-app.sh.
+          if-no-files-found: error

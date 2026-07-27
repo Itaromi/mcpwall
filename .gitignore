@@ -1,3 +1,23 @@
+# --- Artefacts de compilation ---
 /target
+# SwiftPM. Volumineux (plusieurs centaines de Mo) : la totalité du SDK résolu y
+# est recopiée.
+/app/.build
+/app/.swiftpm
+# Sortie de scripts/build-app.sh : le bundle et le .dmg.
+/build
+
+# --- Sauvegardes écrites par `mcpwall init` ---
+# Ce sont les configurations MCP de la personne qui exécute la commande.
 **/*.bak.*
+
+# --- Données locales ---
+# Journal, politique et socket vivent dans ~/.mcpwall, mais un test mal réglé
+# peut en laisser tomber ici.
+*.db
+*.db-wal
+*.db-shm
+*.sock
+
+# --- macOS ---
 .DS_Store

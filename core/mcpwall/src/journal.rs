@@ -454,6 +454,35 @@ pub fn tail(conn: &Connection, limit: i64, since_id: i64) -> Result<Vec<(i64, Lo
     Ok(out)
 }
 
+/// Compteurs du jour, pour le popover : (appels, bloqués, sessions actives).
+///
+/// Lecture indépendante et en seule lecture : l'UI interroge fréquemment, et
+/// elle ne doit jamais pouvoir gêner la tâche d'écriture du shim.
+pub fn today_counters(db: &Path) -> Result<(i64, i64, i64)> {
+    if !db.exists() {
+        return Ok((0, 0, 0));
+    }
+    let conn = open_readonly(db)?;
+    let since = now_ms() - 24 * 3600 * 1000;
+
+    let calls: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM entries WHERE ts_ms >= ?1",
+        [since],
+        |r| r.get(0),
+    )?;
+    let blocked: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM entries WHERE ts_ms >= ?1 AND verdict = 'deny'",
+        [since],
+        |r| r.get(0),
+    )?;
+    let sessions: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sessions WHERE started_ms >= ?1",
+        [since],
+        |r| r.get(0),
+    )?;
+    Ok((calls, blocked, sessions))
+}
+
 pub fn stats(conn: &Connection) -> Result<Stats> {
     let mut s = Stats {
         sessions: conn.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))?,

@@ -393,10 +393,28 @@ Critère : une règle bloque une lecture de `.env` sans que la session de l'agen
 - [x] `policy.rs` — `policy.yaml`, rechargement à chaud, détection de secrets
 - [x] `setup.rs` — `init` avec diff et sauvegardes, `restore`
 
-**M2 — app macOS**
+**M2 — app macOS** *(fait, sauf signature)*
 Menu bar, popover, panneau de décision, fenêtre journal, onboarding graphique,
 supervision de `mcpwall daemon`, lien symbolique, `.dmg` signé et notarisé, Sparkle.
 Critère : installation complète depuis un `.dmg` sur une machine vierge, sans terminal.
+
+- [x] flux de confirmation dans le core : le daemon sait demander, pas seulement refuser
+- [x] `NSStatusItem` + popover, badge chiffré uniquement s'il y a des blocages
+- [x] panneau de décision en `NSPanel` (voir §9), retrait automatique à l'expiration
+- [x] fenêtre Journal filtrable, export JSONL
+- [x] onboarding graphique avec diff avant écriture et restauration en un clic
+- [x] supervision de `mcpwall daemon` comme processus enfant, avec recul croissant
+- [x] lien symbolique refait à chaque lancement
+- [x] assemblage du bundle et du `.dmg` sans Xcode (`scripts/build-app.sh`)
+- [ ] **signature et notarisation** — script écrit (`scripts/sign-app.sh`) mais
+      **jamais exécuté** : aucune identité « Developer ID » disponible. À traiter
+      comme non testé tant que quelqu'un ne l'aura pas fait tourner.
+- [ ] **Sparkle** — non intégré. `SUFeedURL` est laissé vide dans l'`Info.plist` :
+      une URL morte provoquerait une erreur de mise à jour à chaque lancement.
+      À brancher quand un flux existera, avec une paire de clés EdDSA.
+
+Le critère de sortie n'est donc **pas atteint** : sans notarisation, Gatekeeper
+impose un clic droit → Ouvrir, c'est-à-dire exactement la friction que §8 interdit.
 
 **M3 — profondeur**
 Hook Claude Code, taint tracking, détection de dérive des descriptions d'outils,
@@ -510,3 +528,31 @@ mentirait sur la provenance — donc débloquerait `forever` à tort.
 
 **2026-07-27 — Le daemon calcule `forever_allowed` et le transmet.** L'UI n'a pas à
 refaire le raisonnement sur la provenance, et ne peut donc pas se tromper en le refaisant.
+
+**2026-07-27 — Protocole IPC passé en version 2.** Le flux de confirmation change la
+forme des messages, désormais étiquetés par un champ `type`. Rien n'étant publié,
+personne n'en souffre — et c'est le mécanisme qui protégera les mises à jour suivantes.
+
+**2026-07-27 — L'UI est un client, pas une autorité.** Le daemon rétrograde une portée
+`forever` demandée sur un scope de provenance faible, même si l'interface l'a envoyée.
+Une interface compromise ou boguée ne doit pas pouvoir accorder plus que la provenance
+ne le permet.
+
+**2026-07-27 — Le shim dérive son délai de celui annoncé par le daemon.** Défaut le plus
+grave de M2, et invisible tant que l'interface n'existait pas : le shim abandonnait après
+5 s de délai de socket pendant que le daemon attendait le clic. Or **abandonner laisse
+passer** — toute règle `ask` se dégradait en `allow` dès que la personne réfléchissait
+plus de cinq secondes. Le `Hello` du daemon porte maintenant `ask_timeout_seconds`.
+
+**2026-07-27 — `FileHandle` remplacé par les appels système côté Swift.** Son écriture
+bloquait indéfiniment sur un socket Unix : quarante octets qui ne partaient jamais, sans
+erreur ni trace. `FileHandle` est conçu pour les fichiers et les tubes.
+
+**2026-07-27 — L'abonnement est écrit sur le chemin du handshake.** Le faire passer par
+la file d'écriture le perdait, et l'app tournait sans jamais recevoir de demande — le
+daemon refusait alors chaque `ask` en expliquant qu'aucune interface n'était là.
+
+**2026-07-27 — Le bundle est assemblé à la main, sans projet Xcode.** Construction
+identique en CI et sur une machine n'ayant que les Command Line Tools. Le build universel
+exige néanmoins Xcode : le script dégrade en architecture native avec un avertissement,
+et la CI vérifie que les binaires publiés sont bien universels.

@@ -37,14 +37,28 @@ proxy.
 
 ## État
 
-Jalons M0 et M1 faits : relais stdio, journal, daemon de politique, `init`/`restore`.
-Il n'y a **pas encore d'interface** — le panneau de décision arrive en M2, et en
-attendant une règle `ask` bloque au lieu de demander. Utilisable en ligne de commande,
-pas encore livrable à quelqu'un qui ne lit pas ce README.
+Jalons M0, M1 et M2 faits : relais stdio, journal, daemon de politique,
+`init`/`restore`, et l'application macOS — barre de menus, panneau de décision,
+fenêtre journal, installation graphique.
 
-Voir [SPEC.md](SPEC.md) pour l'architecture, les décisions prises et leurs raisons.
+**Il n'y a pas encore de version distribuable.** Le `.dmg` n'est ni signé ni
+notarisé, donc Gatekeeper impose un clic droit → Ouvrir. Sparkle n'est pas
+branché. Voir [SPEC.md](SPEC.md) §10 pour ce qui reste, et pour l'architecture
+et les décisions prises avec leurs raisons.
 
-## Essayer
+## Construire et essayer
+
+```sh
+# L'application, avec le core embarqué
+./scripts/build-app.sh
+open build/mcpwall.app
+```
+
+L'app lance le daemon, crée le lien symbolique vers le binaire, et propose
+l'installation dans vos clients MCP au premier lancement — avec le diff de ce
+qui va changer, avant d'écrire quoi que ce soit.
+
+En ligne de commande seule, sans interface :
 
 ```sh
 cargo build --release
@@ -69,6 +83,9 @@ La politique vit dans `~/.mcpwall/policy.yaml` et se recharge à chaud.
 Par défaut elle laisse tout passer sauf l'accès aux chemins de secrets et les
 identifiants repérés dans les arguments.
 
+Sans l'application, une règle `ask` **bloque** au lieu de demander : personne
+n'est là pour confirmer. Le message renvoyé à l'agent le dit explicitement.
+
 ## Principes
 
 - **Local-first.** Aucune télémétrie, aucun compte, aucune requête sortante hors
@@ -83,10 +100,17 @@ identifiants repérés dans les arguments.
 ## Développement
 
 ```sh
-cargo test
-cargo clippy --all-targets -- -D warnings
+cargo test                                    # 167 tests
+cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --check
+cargo test --release --test bench -- --nocapture   # latence, seuil 5 ms p99
+
+cd app && swift build                         # l'application
 ```
+
+Le build universel de l'app exige Xcode ; avec les seuls Command Line Tools,
+`scripts/build-app.sh` dégrade en architecture native et vous prévient. La CI
+vérifie que les binaires publiés sont bien universels.
 
 ## Licence
 

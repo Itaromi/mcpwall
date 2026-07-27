@@ -298,12 +298,16 @@ fn un_shim_de_version_incompatible_passe_en_fail_open() {
 
     let reply = lines.next().expect("réponse").expect("ligne");
     let hello: serde_json::Value = serde_json::from_str(&reply).expect("json");
-    assert_eq!(hello["mcpwall_ipc"], 1, "le daemon annonce sa version");
+    assert_eq!(hello["mcpwall_ipc"], 2, "le daemon annonce sa version");
 
     // Le daemon ferme la connexion plutôt que de risquer un verdict mal
     // interprété : un verdict incompris, c'est soit un blocage fantôme, soit un
     // trou dans le pare-feu.
-    writeln!(write, r#"{{"method":"tools/call","frame":"{{}}","scope_key":"x","scope_source":"cwd","scope_paths":[],"server":null,"session_id":0}}"#).ok();
+    writeln!(
+        write,
+        r#"{{"type":"decide","method":"tools/call","frame":"{{}}","scope_key":"x","scope_source":"cwd","scope_paths":[],"server":null,"session_id":0}}"#
+    )
+    .ok();
     assert!(
         lines.next().is_none(),
         "aucun verdict ne doit être rendu après un handshake incompatible"
@@ -321,7 +325,7 @@ fn un_handshake_compatible_est_accepte() {
     let mut write = stream.try_clone().expect("clone");
     let mut lines = BufReader::new(stream).lines();
 
-    writeln!(write, r#"{{"mcpwall_ipc": 1, "build": "test"}}"#).expect("hello");
+    writeln!(write, r#"{{"mcpwall_ipc": 2, "build": "test"}}"#).expect("hello");
     let _ = lines.next().expect("hello du daemon");
 
     let frame = serde_json::json!({
@@ -330,6 +334,7 @@ fn un_handshake_compatible_est_accepte() {
     })
     .to_string();
     let req = serde_json::json!({
+        "type": "decide",
         "method": "tools/call",
         "frame": frame,
         "scope_key": "project:/p",
@@ -342,6 +347,7 @@ fn un_handshake_compatible_est_accepte() {
 
     let reply = lines.next().expect("verdict").expect("ligne");
     let v: serde_json::Value = serde_json::from_str(&reply).expect("json");
+    assert_eq!(v["type"], "verdict", "le daemon étiquette ses messages");
     assert_eq!(v["outcome"], "deny");
     assert_eq!(v["rule"], "secrets_paths");
     // Provenance de rang 1 : `forever` est offrable.
@@ -361,7 +367,7 @@ fn forever_est_refuse_en_provenance_faible() {
     let stream = UnixStream::connect(&d.socket).expect("connexion");
     let mut write = stream.try_clone().expect("clone");
     let mut lines = BufReader::new(stream).lines();
-    writeln!(write, r#"{{"mcpwall_ipc": 1, "build": "test"}}"#).expect("hello");
+    writeln!(write, r#"{{"mcpwall_ipc": 2, "build": "test"}}"#).expect("hello");
     let _ = lines.next();
 
     for (source, attendu) in [
@@ -371,6 +377,7 @@ fn forever_est_refuse_en_provenance_faible() {
         ("unknown", false),
     ] {
         let req = serde_json::json!({
+            "type": "decide",
             "method": "tools/call",
             "frame": r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#,
             "scope_key": "project:/p",
