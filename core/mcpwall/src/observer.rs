@@ -1,11 +1,11 @@
-//! L'observateur qui relie le relais au journal.
+//! The observer that connects the relay to the journal.
 //!
-//! C'est lui qui tient l'état de session : capture de l'`initialize`, écoute
-//! passive des racines, résolution du scope. Le relais, lui, ne connaît que des
-//! octets et des verdicts — la sémantique de session vit ici.
+//! It holds the session state: capturing `initialize`, passively listening for
+//! roots, resolving the scope. The relay itself knows only bytes and verdicts —
+//! session semantics live here.
 //!
-//! Aucune méthode ne rend d'erreur : par construction, un observateur en
-//! difficulté ne peut pas interrompre le trafic.
+//! No method returns an error: by construction, an observer in trouble cannot
+//! interrupt traffic.
 
 use std::sync::{Arc, Mutex};
 
@@ -15,11 +15,11 @@ use crate::mcp::{MethodScan, Verdict, parse_client_hello, parse_server_hello};
 use crate::scope::{ScopeResolver, ScopeSource, parse_root_uri};
 use crate::wrap::{Anomaly, Direction, FrameEvent, Observer};
 
-/// Longueur maximale d'un extrait d'arguments stocké.
+/// Maximum length of a stored argument excerpt.
 ///
-/// Le journal ne doit **jamais** contenir la valeur d'un secret détecté. On
-/// tronque, et en M1 le moteur de politique remplacera l'extrait par le type du
-/// secret et un préfixe.
+/// The journal must **never** contain the value of a detected secret. We
+/// truncate, and in M1 the policy engine replaces the excerpt with the kind of
+/// secret and a prefix.
 const PREVIEW_MAX: usize = 200;
 
 #[derive(Default)]
@@ -27,8 +27,9 @@ struct State {
     session_id: i64,
     row: SessionRow,
     scope: ScopeResolver,
-    /// `id` de la requête `initialize`, pour reconnaître sa réponse dans le flux
-    /// descendant — c'est elle qui porte la version négociée et le `serverInfo`.
+    /// `id` of the `initialize` request, so its response can be recognised in
+    /// the downward stream — that is what carries the negotiated version and
+    /// the `serverInfo`.
     initialize_id: Option<String>,
     dirty: bool,
 }
@@ -39,7 +40,7 @@ pub struct JournalObserver {
 }
 
 impl JournalObserver {
-    /// Ouvre la session en base et rend l'observateur prêt à l'emploi.
+    /// Opens the session in the database and returns a ready observer.
     pub async fn new(
         journal: Journal,
         command: String,
@@ -47,11 +48,11 @@ impl JournalObserver {
     ) -> Arc<Self> {
         let mut scope = ScopeResolver::new();
 
-        // Maillon 1 : le chemin injecté par `mcpwall init`.
+        // Link 1: the path injected by `mcpwall init`.
         if let Some(p) = project {
             scope.set_injected(crate::scope::canonicalize_for_scope(&p));
         }
-        // Maillon 3 : le cwd hérité du client, canonicalisé.
+        // Link 3: the cwd inherited from the client, canonicalised.
         if let Ok(cwd) = std::env::current_dir() {
             scope.set_cwd(crate::scope::canonicalize_for_scope(&cwd));
         }
@@ -83,7 +84,7 @@ impl JournalObserver {
         &self.journal
     }
 
-    /// Extrait de `params`, tronqué sur une frontière de caractère.
+    /// Excerpt of `params`, truncated on a character boundary.
     fn preview(frame: &[u8]) -> Option<String> {
         let text = std::str::from_utf8(frame).ok()?;
         let params = text.find("\"params\"").unwrap_or(0);
@@ -97,10 +98,10 @@ impl JournalObserver {
         Some(slice[..end].to_owned())
     }
 
-    /// Capture ce qui a de la valeur dans le trafic OBSERVE.
+    /// Captures what is worth keeping from OBSERVE traffic.
     fn observe_semantics(&self, event: &FrameEvent<'_>) {
         let Ok(mut st) = self.state.lock() else {
-            // Verrou empoisonné : on renonce à la sémantique, pas au relais.
+            // Poisoned lock: we give up on semantics, not on the relay.
             return;
         };
 
@@ -114,8 +115,9 @@ impl JournalObserver {
                 st.initialize_id = request_id(event.frame.content());
             }
 
-            // La réponse à `initialize` porte la version **négociée** et le
-            // `serverInfo`. C'est elle qu'on stocke, pas la demande du client.
+            // The response to `initialize` carries the **negotiated** version
+            // and the `serverInfo`. That is what we store, not the client's
+            // request.
             (Direction::ToClient, None) => {
                 let is_init_reply = match (&st.initialize_id, request_id(event.frame.content())) {
                     (Some(expected), Some(got)) => *expected == got,
@@ -129,9 +131,9 @@ impl JournalObserver {
                 }
             }
 
-            // Maillon 2 du scope : les racines, observées passivement. La
-            // requête vient du serveur, la réponse du client — elle circule donc
-            // dans le sens montant.
+            // Link 2 of the scope: the roots, observed passively. The request
+            // comes from the server, the response from the client — so it
+            // travels in the upward direction.
             (Direction::ToServer, None) => {
                 if let Some(roots) = parse_roots(event.frame.content()) {
                     st.scope.observe_roots(roots);
@@ -148,7 +150,7 @@ impl JournalObserver {
         if st.dirty {
             st.dirty = false;
             let (id, row) = (st.session_id, st.row.clone());
-            drop(st); // jamais de verrou tenu pendant un envoi
+            drop(st); // never hold a lock across a send
             self.journal.update_session(id, row);
         }
     }
@@ -188,7 +190,7 @@ impl Observer for JournalObserver {
 
         let (direction, kind, rule) = match anomaly {
             Anomaly::Oversize { direction, limit } => {
-                tracing::warn!(limite = limit, "frame surdimensionnée rejetée");
+                tracing::warn!(limit = limit, "oversized frame rejected");
                 (*direction, "oversize", Some("frame_oversize"))
             }
             Anomaly::Unterminated { direction } => (*direction, "unterminated", None),
@@ -198,7 +200,7 @@ impl Observer for JournalObserver {
                 reason,
                 fail_closed,
             } => {
-                tracing::warn!(raison = %reason, fail_closed, "point de décision indisponible");
+                tracing::warn!(reason = %reason, fail_closed, "decision point unavailable");
                 (*direction, "decision_unavailable", Some("fail_open"))
             }
         };
@@ -213,19 +215,19 @@ impl Observer for JournalObserver {
         tracing::debug!(
             %direction,
             frames = stats.frames,
-            octets = stats.bytes_in,
-            vides = stats.empty_skipped,
-            surdimensionnées = stats.oversize,
-            non_terminées = stats.unterminated,
-            "fin de flux"
+            bytes = stats.bytes_in,
+            empty = stats.empty_skipped,
+            oversize = stats.oversize,
+            unterminated = stats.unterminated,
+            "end of stream"
         );
     }
 }
 
-/// `id` d'une requête ou d'une réponse, rendu sous forme textuelle.
+/// `id` of a request or a response, rendered as text.
 ///
-/// La spec autorise un entier ou une chaîne ; on normalise pour comparer sans
-/// se soucier du type.
+/// The spec allows an integer or a string; we normalise so comparison need not
+/// care about the type.
 fn request_id(frame: &[u8]) -> Option<String> {
     let v: serde_json::Value = serde_json::from_slice(frame).ok()?;
     match v.get("id")? {
@@ -235,10 +237,10 @@ fn request_id(frame: &[u8]) -> Option<String> {
     }
 }
 
-/// Extrait les racines d'une réponse à `roots/list`.
+/// Extracts the roots from a response to `roots/list`.
 ///
-/// Une racine dont l'URI n'est pas comprise est ignorée plutôt que rapprochée
-/// de force d'un chemin : elle ne doit jamais devenir une clé de permission.
+/// A root whose URI is not understood is ignored rather than forced into
+/// resembling a path: it must never become a permission key.
 fn parse_roots(frame: &[u8]) -> Option<Vec<std::path::PathBuf>> {
     let v: serde_json::Value = serde_json::from_slice(frame).ok()?;
     let roots = v.get("result")?.get("roots")?.as_array()?;
@@ -250,7 +252,7 @@ fn parse_roots(frame: &[u8]) -> Option<Vec<std::path::PathBuf>> {
     (!paths.is_empty()).then_some(paths)
 }
 
-/// Provenance courante du scope, pour l'UI et les tests.
+/// Current scope provenance, for the UI and the tests.
 impl JournalObserver {
     pub fn scope_source(&self) -> ScopeSource {
         self.state

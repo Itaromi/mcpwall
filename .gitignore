@@ -1,19 +1,19 @@
-# --- Artefacts de compilation ---
+# --- Build artefacts ---
 /target
-# SwiftPM. Volumineux (plusieurs centaines de Mo) : la totalité du SDK résolu y
-# est recopiée.
+# SwiftPM. Bulky (several hundred MB): the whole resolved SDK gets copied in
+# there.
 /app/.build
 /app/.swiftpm
-# Sortie de scripts/build-app.sh : le bundle et le .dmg.
+# Output of scripts/build-app.sh: the bundle and the .dmg.
 /build
 
-# --- Sauvegardes écrites par `mcpwall init` ---
-# Ce sont les configurations MCP de la personne qui exécute la commande.
+# --- Backups written by `mcpwall init` ---
+# These are the MCP configurations of whoever ran the command.
 **/*.bak.*
 
-# --- Données locales ---
-# Journal, politique et socket vivent dans ~/.mcpwall, mais un test mal réglé
-# peut en laisser tomber ici.
+# --- Local data ---
+# Journal, policy and socket live in ~/.mcpwall, but a misconfigured test can
+# drop them here.
 *.db
 *.db-wal
 *.db-shm

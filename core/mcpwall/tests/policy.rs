@@ -1,9 +1,9 @@
-//! Tests du moteur de politique.
+//! Policy engine tests.
 //!
-//! L'obsession ici est le **faux positif** : une règle qui interrompt à tort
-//! forme l'utilisateur à cliquer « autoriser » sans lire, ce qui annule le
-//! produit entier. Presque autant de tests vérifient qu'une règle *ne*
-//! déclenche *pas* que l'inverse.
+//! The obsession here is the **false positive**: a rule that interrupts
+//! wrongly trains the user to click "allow" without reading, which negates the
+//! entire product. Almost as many tests check that a rule does *not* fire as
+//! check that it does.
 
 use std::path::PathBuf;
 
@@ -17,7 +17,7 @@ fn scope(paths: &[&str]) -> Scope {
     )
 }
 
-/// Évalue un `tools/call` contre une politique.
+/// Evaluates a `tools/call` against a policy.
 fn eval(
     policy: &Policy,
     tool: &str,
@@ -37,229 +37,232 @@ fn eval(
     policy.evaluate(&req)
 }
 
-/// Écrit une politique dans un répertoire propre à l'appelant et la charge.
+/// Writes a policy into a directory of the caller's own and loads it.
 ///
-/// Un répertoire par test, pas un pour tous : les tests tournent en parallèle,
-/// et un fichier tronqué par une écriture concurrente se relisait en « tout
-/// autoriser » — un test vert pour la mauvaise raison.
+/// One directory per test, not one for all: the tests run in parallel, and a
+/// file truncated by a concurrent write used to read back as "allow
+/// everything" — a green test for the wrong reason.
 fn policy_from(tag: &str, yaml: &str) -> Policy {
     let dir = std::env::temp_dir().join(format!("mcpwall-pol-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("répertoire");
+    std::fs::create_dir_all(&dir).expect("directory");
     let path = dir.join("policy.yaml");
-    std::fs::write(&path, yaml).expect("écriture");
-    Policy::load(&path).expect("chargement")
+    std::fs::write(&path, yaml).expect("write");
+    Policy::load(&path).expect("load")
 }
 
 fn default_policy(tag: &str) -> Policy {
-    let file = Policy::parse(DEFAULT_POLICY_YAML).expect("politique par défaut valide");
+    let file = Policy::parse(DEFAULT_POLICY_YAML).expect("default policy must be valid");
     assert_eq!(file.default, Action::Allow);
-    // On passe par le même chemin que la production.
+    // We go through the same path as production.
     policy_from(tag, DEFAULT_POLICY_YAML)
 }
 
-// --- La politique par défaut est valide et discrète ---
+// --- The default policy is valid and unobtrusive ---
 
 #[test]
-fn la_politique_par_defaut_se_parse() {
-    let f = Policy::parse(DEFAULT_POLICY_YAML).expect("doit se parser");
+fn the_default_policy_parses() {
+    let f = Policy::parse(DEFAULT_POLICY_YAML).expect("must parse");
     assert_eq!(f.default, Action::Allow);
-    assert!(!f.fail_closed, "fail_closed doit rester faux par défaut");
+    assert!(!f.fail_closed, "fail_closed must stay false by default");
     assert_eq!(f.ask_timeout_seconds, 60);
     assert!(f.rules.len() >= 4);
 }
 
 #[test]
-fn au_repos_la_politique_par_defaut_ne_demande_rien() {
-    // Le test anti-fatigue d'alerte. Du trafic ordinaire ne doit produire
-    // aucune interruption.
-    let p = default_policy("au_repos_la_politique_par_defaut_ne_demande_rien");
-    let sc = scope(&["/Users/x/projet"]);
+fn at_rest_the_default_policy_asks_nothing() {
+    // The anti-alert-fatigue test. Ordinary traffic must produce no
+    // interruption at all.
+    let p = default_policy("at_rest_the_default_policy_asks_nothing");
+    let sc = scope(&["/Users/x/project"]);
 
     for (tool, args) in [
         (
             "read_file",
-            serde_json::json!({"path": "/Users/x/projet/src/main.rs"}),
+            serde_json::json!({"path": "/Users/x/project/src/main.rs"}),
         ),
         (
             "list_directory",
-            serde_json::json!({"path": "/Users/x/projet"}),
+            serde_json::json!({"path": "/Users/x/project"}),
         ),
         ("search", serde_json::json!({"query": "fn main"})),
         ("git_status", serde_json::json!({})),
         (
             "write_file",
-            serde_json::json!({"path": "/Users/x/projet/out.txt", "content": "bonjour"}),
+            serde_json::json!({"path": "/Users/x/project/out.txt", "content": "hello"}),
         ),
     ] {
         let d = eval(&p, tool, args, &sc);
-        assert_eq!(d.action, Action::Allow, "{tool} ne doit pas interrompre");
+        assert_eq!(d.action, Action::Allow, "{tool} must not interrupt");
     }
 }
 
-// --- Chemins de secrets ---
+// --- Secret paths ---
 
 #[test]
-fn la_lecture_dun_env_declenche() {
-    let p = default_policy("la_lecture_dun_env_declenche");
+fn reading_a_dotenv_fires() {
+    let p = default_policy("reading_a_dotenv_fires");
     let d = eval(
         &p,
         "read_file",
-        serde_json::json!({"path": "/Users/x/projet/.env"}),
-        &scope(&["/Users/x/projet"]),
+        serde_json::json!({"path": "/Users/x/project/.env"}),
+        &scope(&["/Users/x/project"]),
     );
     assert_eq!(d.action, Action::Ask);
     assert_eq!(d.rule.as_deref(), Some("secrets_paths"));
 }
 
 #[test]
-fn les_cles_ssh_declenchent() {
-    let p = default_policy("les_cles_ssh_declenchent");
+fn ssh_keys_fire() {
+    let p = default_policy("ssh_keys_fire");
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
-    for chemin in [
+    for path in [
         format!("{home}/.ssh/id_rsa"),
         format!("{home}/.aws/credentials"),
     ] {
         let d = eval(
             &p,
             "read_file",
-            serde_json::json!({ "path": chemin }),
-            &scope(&["/Users/x/projet"]),
+            serde_json::json!({ "path": path }),
+            &scope(&["/Users/x/project"]),
         );
-        assert_eq!(d.action, Action::Ask, "{chemin}");
+        assert_eq!(d.action, Action::Ask, "{path}");
     }
 }
 
 #[test]
-fn un_fichier_nomme_environment_ne_declenche_pas() {
-    // `**/.env` ne doit pas attraper `environment.ts` ni `.envrc`.
-    let p = default_policy("un_fichier_nomme_environment_ne_declenche_pas");
-    for chemin in [
-        "/Users/x/projet/src/environment.ts",
-        "/Users/x/projet/env.example",
-        "/Users/x/projet/docs/environnement.md",
+fn a_file_named_environment_does_not_fire() {
+    // `**/.env` must not catch `environment.ts` or `.envrc`.
+    let p = default_policy("a_file_named_environment_does_not_fire");
+    for path in [
+        "/Users/x/project/src/environment.ts",
+        "/Users/x/project/env.example",
+        "/Users/x/project/docs/environment.md",
     ] {
         let d = eval(
             &p,
             "read_file",
-            serde_json::json!({ "path": chemin }),
-            &scope(&["/Users/x/projet"]),
+            serde_json::json!({ "path": path }),
+            &scope(&["/Users/x/project"]),
         );
-        assert_eq!(d.action, Action::Allow, "faux positif sur {chemin}");
+        assert_eq!(d.action, Action::Allow, "false positive on {path}");
     }
 }
 
-// --- Détection de secrets ---
+// --- Secret detection ---
 
 #[test]
-fn une_cle_aws_dans_les_arguments_declenche() {
-    let p = default_policy("une_cle_aws_dans_les_arguments_declenche");
+fn an_aws_key_in_the_arguments_fires() {
+    let p = default_policy("an_aws_key_in_the_arguments_fires");
     let d = eval(
         &p,
         "http_post",
         serde_json::json!({"body": "AKIAIOSFODNN7EXAMPLE"}),
-        &scope(&["/Users/x/projet"]),
+        &scope(&["/Users/x/project"]),
     );
     assert_eq!(d.action, Action::Ask);
     assert_eq!(d.rule.as_deref(), Some("secret_pattern"));
 }
 
 #[test]
-fn le_journal_ne_recoit_jamais_la_valeur_du_secret() {
-    // Convention du projet : on stocke le type et un préfixe tronqué, jamais la
-    // valeur. Un journal d'audit qui recopie les secrets est un aggravateur de
-    // fuite, pas une protection.
-    let p = default_policy("le_journal_ne_recoit_jamais_la_valeur_du_secret");
+fn the_journal_never_receives_the_secret_value() {
+    // Project convention: we store the kind and a truncated prefix, never the
+    // value. An audit journal that copies secrets makes leaks worse, it does
+    // not protect against them.
+    let p = default_policy("the_journal_never_receives_the_secret_value");
     let secret = "AKIAIOSFODNN7EXAMPLE";
     let d = eval(
         &p,
         "http_post",
         serde_json::json!({ "body": secret }),
-        &scope(&["/Users/x/projet"]),
+        &scope(&["/Users/x/project"]),
     );
 
     let message = d.agent_message();
-    assert!(!message.contains(secret), "secret recopié : {message}");
-    assert!(message.contains("AKIAIO"), "préfixe attendu : {message}");
+    assert!(
+        !message.contains(secret),
+        "secret copied through: {message}"
+    );
+    assert!(message.contains("AKIAIO"), "prefix expected: {message}");
 
     match d.findings.first() {
         Some(Finding::Secret { kind, prefix }) => {
-            assert_eq!(*kind, "clé d'accès AWS");
+            assert_eq!(*kind, "AWS access key");
             assert_eq!(prefix.len(), 6);
             assert!(!secret.ends_with(prefix.as_str()) || prefix.len() < secret.len());
         }
-        other => panic!("découverte attendue, obtenu {other:?}"),
+        other => panic!("expected a finding, got {other:?}"),
     }
 }
 
 #[test]
-fn les_detecteurs_de_secrets_sont_avares() {
-    // Chaque motif est une source potentielle de faux positifs. Ces valeurs
-    // ressemblent à des secrets sans en être.
-    let p = default_policy("les_detecteurs_de_secrets_sont_avares");
-    for valeur in [
-        "AKIA",                 // trop court
-        "akiaiosfodnn7example", // minuscules
-        "sk-",                  // trop court
-        "ghp_court",            // trop court
-        "un texte qui parle de sk- et de tokens",
+fn the_secret_detectors_are_stingy() {
+    // Every pattern is a potential source of false positives. These values look
+    // like secrets without being any.
+    let p = default_policy("the_secret_detectors_are_stingy");
+    for value in [
+        "AKIA",                 // too short
+        "akiaiosfodnn7example", // lowercase
+        "sk-",                  // too short
+        "ghp_short",            // too short
+        "some prose mentioning sk- and tokens",
     ] {
         let d = eval(
             &p,
             "http_post",
-            serde_json::json!({ "body": valeur }),
-            &scope(&["/Users/x/projet"]),
+            serde_json::json!({ "body": value }),
+            &scope(&["/Users/x/project"]),
         );
-        assert_eq!(d.action, Action::Allow, "faux positif sur {valeur:?}");
+        assert_eq!(d.action, Action::Allow, "false positive on {value:?}");
     }
 }
 
 #[test]
-fn une_cle_privee_est_reconnue() {
-    let p = default_policy("une_cle_privee_est_reconnue");
+fn a_private_key_is_recognised() {
+    let p = default_policy("a_private_key_is_recognised");
     let d = eval(
         &p,
         "http_post",
         serde_json::json!({"body": "-----BEGIN OPENSSH PRIVATE KEY-----\nabc"}),
-        &scope(&["/Users/x/projet"]),
+        &scope(&["/Users/x/project"]),
     );
     assert_eq!(d.action, Action::Ask);
 }
 
-// --- Sortie de projet ---
+// --- Leaving the project ---
 
 #[test]
-fn une_ecriture_hors_projet_declenche() {
-    let p = default_policy("une_ecriture_hors_projet_declenche");
+fn a_write_outside_the_project_fires() {
+    let p = default_policy("a_write_outside_the_project_fires");
     let d = eval(
         &p,
         "write_file",
         serde_json::json!({"path": "/etc/hosts", "content": "x"}),
-        &scope(&["/Users/x/projet"]),
+        &scope(&["/Users/x/project"]),
     );
     assert_eq!(d.action, Action::Ask);
     assert_eq!(d.rule.as_deref(), Some("outside_project_write"));
 }
 
 #[test]
-fn une_lecture_hors_projet_ne_declenche_pas() {
-    // La règle vise les écritures. Lire une doc système est banal.
-    let p = default_policy("une_lecture_hors_projet_ne_declenche_pas");
+fn a_read_outside_the_project_does_not_fire() {
+    // The rule targets writes. Reading system documentation is unremarkable.
+    let p = default_policy("a_read_outside_the_project_does_not_fire");
     let d = eval(
         &p,
         "read_file",
         serde_json::json!({"path": "/usr/share/doc/readme"}),
-        &scope(&["/Users/x/projet"]),
+        &scope(&["/Users/x/project"]),
     );
     assert_eq!(d.action, Action::Allow);
 }
 
 #[test]
-fn un_scope_inconnu_ne_declenche_jamais_la_sortie_de_projet() {
-    // Sans savoir où est le projet, on ne peut pas dire qu'on en sort.
-    // Prétendre le contraire ferait déclencher la règle sur tout le trafic de
-    // Claude Desktop, dont le cwd n'a aucun rapport avec un projet.
-    let p = default_policy("un_scope_inconnu_ne_declenche_jamais_la_sortie_de_projet");
+fn an_unknown_scope_never_fires_the_outside_project_rule() {
+    // Without knowing where the project is, we cannot say we are leaving it.
+    // Pretending otherwise would fire the rule on all of Claude Desktop's
+    // traffic, whose cwd bears no relation to a project.
+    let p = default_policy("an_unknown_scope_never_fires_the_outside_project_rule");
     let d = eval(
         &p,
         "write_file",
@@ -269,42 +272,42 @@ fn un_scope_inconnu_ne_declenche_jamais_la_sortie_de_projet() {
     assert_eq!(d.action, Action::Allow);
 }
 
-// --- Règles M3 inertes ---
+// --- Inert M3 rules ---
 
 #[test]
-fn les_regles_de_teinte_ne_declenchent_pas_encore() {
-    // `taint_exfil` et `tool_description_drift` sont présentes dans le fichier
-    // mais inertes tant que M3 n'existe pas. Une règle inerte et visible vaut
-    // mieux qu'une règle absente qu'on oublierait d'écrire — mais elle ne doit
-    // surtout pas bloquer par accident.
-    let p = default_policy("les_regles_de_teinte_ne_declenchent_pas_encore");
+fn the_taint_rules_do_not_fire_yet() {
+    // `taint_exfil` and `tool_description_drift` are present in the file but
+    // inert as long as M3 does not exist. An inert, visible rule beats an
+    // absent rule we would forget to write — but above all it must not block
+    // by accident.
+    let p = default_policy("the_taint_rules_do_not_fire_yet");
     let d = eval(
         &p,
         "http_post",
-        serde_json::json!({"body": "des données quelconques"}),
-        &scope(&["/Users/x/projet"]),
+        serde_json::json!({"body": "some arbitrary data"}),
+        &scope(&["/Users/x/project"]),
     );
     assert_eq!(d.action, Action::Allow);
     assert_ne!(d.rule.as_deref(), Some("taint_exfil"));
 }
 
-// --- Robustesse du fichier ---
+// --- File robustness ---
 
 #[test]
-fn une_condition_vide_ne_matche_rien() {
-    // Sans cette garde, une faute de frappe dans un nom de condition
-    // produirait une règle sans condition, donc un blocage de tout le trafic.
+fn an_empty_condition_matches_nothing() {
+    // Without this guard, a typo in a condition name would produce a rule with
+    // no conditions, and therefore block all traffic.
     let yaml = r#"
 default: allow
 rules:
-  - id: vide
+  - id: empty
     when: {}
     action: deny
 "#;
     let file = Policy::parse(yaml).expect("parse");
     assert_eq!(file.rules.len(), 1);
 
-    let p = policy_from("une_condition_vide_ne_matche_rien", yaml);
+    let p = policy_from("an_empty_condition_matches_nothing", yaml);
 
     let d = eval(
         &p,
@@ -312,61 +315,57 @@ rules:
         serde_json::json!({"path": "/x"}),
         &scope(&["/x"]),
     );
-    assert_eq!(
-        d.action,
-        Action::Allow,
-        "une règle vide ne doit rien bloquer"
-    );
+    assert_eq!(d.action, Action::Allow, "an empty rule must block nothing");
 }
 
 #[test]
-fn une_politique_vide_est_refusee() {
-    // Trouvé par un test devenu instable : tous les champs ayant un défaut, un
-    // fichier vide se désérialisait en `default: allow` sans aucune règle. Un
-    // `policy.yaml` tronqué — disque plein, éditeur interrompu, écriture
-    // partielle — aurait donc désactivé le pare-feu sans un mot.
-    for vide in ["", "   ", "\n\n", "\t\n  "] {
+fn an_empty_policy_is_refused() {
+    // Found via a test that turned flaky: since every field has a default, an
+    // empty file deserialised into `default: allow` with no rules at all. A
+    // truncated `policy.yaml` — full disk, interrupted editor, partial write —
+    // would therefore have disabled the firewall without a word.
+    for empty in ["", "   ", "\n\n", "\t\n  "] {
         assert!(
-            Policy::parse(vide).is_err(),
-            "une politique vide ne doit jamais valoir « tout autoriser » : {vide:?}"
+            Policy::parse(empty).is_err(),
+            "an empty policy must never mean 'allow everything': {empty:?}"
         );
     }
 }
 
 #[test]
-fn une_politique_tronquee_laisse_lancienne_active() {
-    // Le corollaire à chaud : si le fichier est vidé pendant une session, on
-    // continue avec ce qu'on avait plutôt que d'ouvrir en grand.
+fn a_truncated_policy_leaves_the_previous_one_active() {
+    // The hot-reload corollary: if the file is emptied during a session, we
+    // carry on with what we had rather than throwing the doors open.
     let dir = std::env::temp_dir().join(format!("mcpwall-tronq-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("répertoire");
+    std::fs::create_dir_all(&dir).expect("directory");
     let path = dir.join("policy.yaml");
 
-    std::fs::write(&path, "default: deny\nrules: []\n").expect("écriture");
-    let mut p = Policy::load(&path).expect("chargement");
+    std::fs::write(&path, "default: deny\nrules: []\n").expect("write");
+    let mut p = Policy::load(&path).expect("load");
     assert_eq!(p.default_action(), Action::Deny);
 
     std::thread::sleep(std::time::Duration::from_millis(1100));
-    std::fs::write(&path, "").expect("troncature");
+    std::fs::write(&path, "").expect("truncate");
 
     assert!(!p.reload_if_changed());
     assert_eq!(
         p.default_action(),
         Action::Deny,
-        "un fichier vidé ne doit pas désactiver le filtrage"
+        "an emptied file must not disable filtering"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn un_champ_inconnu_est_refuse() {
-    // Mieux vaut refuser le fichier que d'ignorer silencieusement une règle que
-    // l'utilisateur croit active.
+fn an_unknown_field_is_refused() {
+    // Better to refuse the file than to silently ignore a rule the user
+    // believes is active.
     let yaml = r#"
 default: allow
 rules:
-  - id: faute
+  - id: typo
     when:
       arg_path_matchez: ["**/.env"]
     action: deny
@@ -375,20 +374,20 @@ rules:
 }
 
 #[test]
-fn la_premiere_regle_qui_matche_gagne() {
+fn the_first_matching_rule_wins() {
     let yaml = r#"
 default: allow
 rules:
-  - id: premiere
+  - id: first
     when:
       tool_matches: ["read_*"]
     action: allow
-  - id: seconde
+  - id: second
     when:
       arg_path_matches: ["**/.env"]
     action: deny
 "#;
-    let p = policy_from("la_premiere_regle_qui_matche_gagne", yaml);
+    let p = policy_from("the_first_matching_rule_wins", yaml);
 
     let d = eval(
         &p,
@@ -397,13 +396,13 @@ rules:
         &scope(&["/x"]),
     );
     assert_eq!(d.action, Action::Allow);
-    assert_eq!(d.rule.as_deref(), Some("premiere"));
+    assert_eq!(d.rule.as_deref(), Some("first"));
 }
 
 // --- Overrides ---
 
 #[test]
-fn un_override_prime_sur_les_regles() {
+fn an_override_takes_precedence_over_the_rules() {
     let yaml = r#"
 default: allow
 rules:
@@ -412,18 +411,18 @@ rules:
       arg_path_matches: ["**/.env"]
     action: deny
 overrides:
-  - scope: "project:/Users/x/projet"
+  - scope: "project:/Users/x/project"
     tool: "read_file"
     action: allow
     until: forever
 "#;
-    let p = policy_from("un_override_prime_sur_les_regles", yaml);
+    let p = policy_from("an_override_takes_precedence_over_the_rules", yaml);
 
-    let sc = scope(&["/Users/x/projet"]);
+    let sc = scope(&["/Users/x/project"]);
     let d = eval(
         &p,
         "read_file",
-        serde_json::json!({"path": "/Users/x/projet/.env"}),
+        serde_json::json!({"path": "/Users/x/project/.env"}),
         &sc,
     );
     assert_eq!(d.action, Action::Allow);
@@ -431,8 +430,8 @@ overrides:
 }
 
 #[test]
-fn un_override_ne_fuit_pas_vers_un_autre_projet() {
-    // Le contrôle que toute la chaîne de provenance existe pour garantir.
+fn an_override_does_not_leak_into_another_project() {
+    // The check that the whole provenance chain exists to guarantee.
     let yaml = r#"
 default: allow
 rules:
@@ -441,69 +440,69 @@ rules:
       arg_path_matches: ["**/.env"]
     action: deny
 overrides:
-  - scope: "project:/Users/x/projet-a"
+  - scope: "project:/Users/x/project-a"
     tool: "read_file"
     action: allow
     until: forever
 "#;
-    let p = policy_from("un_override_ne_fuit_pas_vers_un_autre_projet", yaml);
+    let p = policy_from("an_override_does_not_leak_into_another_project", yaml);
 
-    let autre = scope(&["/Users/x/projet-b"]);
+    let other = scope(&["/Users/x/project-b"]);
     let d = eval(
         &p,
         "read_file",
-        serde_json::json!({"path": "/Users/x/projet-b/.env"}),
-        &autre,
+        serde_json::json!({"path": "/Users/x/project-b/.env"}),
+        &other,
     );
     assert_eq!(
         d.action,
         Action::Deny,
-        "l'override a fui vers un autre projet"
+        "the override leaked into another project"
     );
 }
 
-// --- Rechargement à chaud ---
+// --- Hot reloading ---
 
 #[test]
-fn la_politique_se_recharge_quand_le_fichier_change() {
+fn the_policy_reloads_when_the_file_changes() {
     let dir = std::env::temp_dir().join(format!("mcpwall-reload-{}", std::process::id()));
     std::fs::create_dir_all(&dir).ok();
     let path = dir.join("p.yaml");
 
-    std::fs::write(&path, "default: allow\nrules: []\n").expect("écriture");
-    let mut p = Policy::load(&path).expect("chargement");
+    std::fs::write(&path, "default: allow\nrules: []\n").expect("write");
+    let mut p = Policy::load(&path).expect("load");
     assert_eq!(p.default_action(), Action::Allow);
 
-    // La granularité des mtime impose d'attendre un peu.
+    // mtime granularity forces us to wait a little.
     std::thread::sleep(std::time::Duration::from_millis(1100));
-    std::fs::write(&path, "default: deny\nrules: []\n").expect("réécriture");
+    std::fs::write(&path, "default: deny\nrules: []\n").expect("rewrite");
 
     assert!(p.reload_if_changed());
     assert_eq!(p.default_action(), Action::Deny);
 }
 
 #[test]
-fn une_politique_invalide_laisse_lancienne_active() {
-    // Un fichier à moitié édité ne doit ni ouvrir le pare-feu en grand, ni le
-    // fermer d'un coup au milieu d'une session de travail.
+fn an_invalid_policy_leaves_the_previous_one_active() {
+    // A half-edited file must neither throw the firewall wide open nor slam it
+    // shut in the middle of a working session.
     let dir = std::env::temp_dir().join(format!("mcpwall-bad-{}", std::process::id()));
     std::fs::create_dir_all(&dir).ok();
     let path = dir.join("p.yaml");
 
-    std::fs::write(&path, "default: deny\nrules: []\n").expect("écriture");
-    let mut p = Policy::load(&path).expect("chargement");
+    std::fs::write(&path, "default: deny\nrules: []\n").expect("write");
+    let mut p = Policy::load(&path).expect("load");
     assert_eq!(p.default_action(), Action::Deny);
 
     std::thread::sleep(std::time::Duration::from_millis(1100));
-    std::fs::write(&path, "default: [ceci n'est pas valide\n").expect("réécriture");
+    std::fs::write(&path, "default: [this is not valid\n").expect("rewrite");
 
     assert!(
         !p.reload_if_changed(),
-        "un fichier invalide ne doit pas être adopté"
+        "an invalid file must not be adopted"
     );
     assert_eq!(
         p.default_action(),
         Action::Deny,
-        "l'ancienne politique doit rester"
+        "the previous policy must remain"
     );
 }

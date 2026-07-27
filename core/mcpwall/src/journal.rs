@@ -1,18 +1,17 @@
-//! Journal SQLite.
+//! SQLite journal.
 //!
-//! Deux chemins, parce que tous les événements ne se valent pas :
+//! Two paths, because not all events are worth the same:
 //!
-//! - **volume** — appels autorisés. Canal borné ; en cas de saturation on jette
-//!   l'entrée plutôt que de ralentir le relais, et on compte la perte.
-//! - **décisions** — `deny`, `ask`, alertes. Rares par nature, **écriture
-//!   garantie**. Un outil d'audit qui perd l'événement justifiant son existence
-//!   n'a plus de raison d'être : c'est cette ligne-là que l'utilisateur exporte
-//!   dans un ticket de sécurité.
+//! - **volume** — allowed calls. Bounded channel; on saturation we drop the
+//!   entry rather than slow the relay down, and we count the loss.
+//! - **decisions** — `deny`, `ask`, alerts. Rare by nature, **guaranteed
+//!   write**. An audit tool that loses the very event justifying its existence
+//!   has no reason to exist: that is the line the user exports into a security
+//!   ticket.
 //!
-//! La pression est réduite à la source plutôt que gérée à la saturation : WAL,
-//! `synchronous = NORMAL`, et regroupement des écritures par transaction. Le
-//! compteur de pertes doit rester à zéro ; s'il monte, c'est un bug, pas un
-//! régime de fonctionnement.
+//! Pressure is reduced at the source rather than managed at saturation: WAL,
+//! `synchronous = NORMAL`, and writes grouped per transaction. The loss counter
+//! must stay at zero; if it climbs, that is a bug, not an operating regime.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -23,14 +22,14 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 use tokio::sync::{mpsc, oneshot};
 
-/// Capacité du canal volume. À mesurer sur trafic réel.
+/// Capacity of the volume channel. To be measured against real traffic.
 const VOLUME_CAPACITY: usize = 4096;
-/// Nombre d'entrées par transaction.
+/// Number of entries per transaction.
 const BATCH_MAX: usize = 256;
-/// Âge maximal d'une entrée en attente avant écriture.
+/// Longest a pending entry may wait before being written.
 const BATCH_LINGER: Duration = Duration::from_millis(200);
 
-/// Une ligne de journal.
+/// One journal row.
 #[derive(Debug, Clone)]
 pub struct Entry {
     pub ts_ms: i64,
@@ -40,8 +39,8 @@ pub struct Entry {
     pub disposition: String,
     pub verdict: Option<String>,
     pub rule: Option<String>,
-    /// Extrait des arguments, tronqué. **Ne doit jamais contenir la valeur d'un
-    /// secret détecté** — on stocke le type et un préfixe.
+    /// Excerpt of the arguments, truncated. **Must never contain the value of a
+    /// detected secret** — we store the kind and a prefix.
     pub preview: Option<String>,
     pub bytes: i64,
 }
@@ -61,7 +60,7 @@ impl Entry {
         }
     }
 
-    /// Une entrée est-elle une décision, donc à écriture garantie ?
+    /// Is an entry a decision, and therefore a guaranteed write?
     fn is_decision(&self) -> bool {
         matches!(self.verdict.as_deref(), Some("deny") | Some("ask")) || self.rule.is_some()
     }
@@ -74,7 +73,7 @@ pub fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// Description d'une session, écrite à l'`initialize`.
+/// Description of a session, written at `initialize` time.
 #[derive(Debug, Clone, Default)]
 pub struct SessionRow {
     pub started_ms: i64,
@@ -84,8 +83,8 @@ pub struct SessionRow {
     pub client_version: Option<String>,
     pub protocol_version: Option<String>,
     pub scope_key: String,
-    /// Provenance du scope. Persistée : c'est elle qui décide si `forever` est
-    /// offrable plus tard.
+    /// Scope provenance. Persisted: it is what decides whether `forever` can be
+    /// offered later.
     pub scope_source: String,
     pub command: String,
 }
@@ -97,30 +96,29 @@ enum Msg {
     Flush(oneshot::Sender<()>),
 }
 
-/// Poignée d'écriture, clonable et bon marché.
+/// Write handle, cheap and clonable.
 #[derive(Clone)]
 pub struct Journal {
     volume: mpsc::Sender<Msg>,
-    /// Les décisions ne passent pas par le canal borné : les perdre est exclu.
+    /// Decisions do not go through the bounded channel: losing them is out of the question.
     decisions: mpsc::UnboundedSender<Msg>,
     dropped: Arc<AtomicU64>,
 }
 
 impl Journal {
-    /// Ouvre la base et démarre la tâche d'écriture.
+    /// Opens the database and starts the writer task.
     pub fn open(path: &Path) -> Result<(Self, tokio::task::JoinHandle<()>)> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
-                .with_context(|| format!("création de {}", parent.display()))?;
+                .with_context(|| format!("creating {}", parent.display()))?;
         }
-        let conn =
-            Connection::open(path).with_context(|| format!("ouverture de {}", path.display()))?;
+        let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
         Self::start(conn)
     }
 
-    /// Variante en mémoire, pour les tests.
+    /// In-memory variant, for tests.
     pub fn open_in_memory() -> Result<(Self, tokio::task::JoinHandle<()>)> {
-        Self::start(Connection::open_in_memory().context("base en mémoire")?)
+        Self::start(Connection::open_in_memory().context("in-memory database")?)
     }
 
     fn start(conn: Connection) -> Result<(Self, tokio::task::JoinHandle<()>)> {
@@ -142,11 +140,11 @@ impl Journal {
         ))
     }
 
-    /// Enregistre une entrée.
+    /// Records an entry.
     ///
-    /// Une décision emprunte le canal garanti. Une entrée de volume est jetée
-    /// si le canal est plein : ralentir le relais coûterait plus cher que
-    /// perdre une ligne d'un appel autorisé parmi mille.
+    /// A decision takes the guaranteed channel. A volume entry is dropped if
+    /// the channel is full: slowing the relay down would cost more than losing
+    /// one line out of a thousand allowed calls.
     pub fn log(&self, entry: Entry) {
         let msg = Msg::Entry(Box::new(entry.clone()));
         if entry.is_decision() {
@@ -158,7 +156,7 @@ impl Journal {
         }
     }
 
-    /// Ouvre une session et rend son identifiant.
+    /// Opens a session and returns its identifier.
     pub async fn open_session(&self, row: SessionRow) -> Option<i64> {
         let (tx, rx) = oneshot::channel();
         self.decisions.send(Msg::Session(Box::new(row), tx)).ok()?;
@@ -169,14 +167,13 @@ impl Journal {
         let _ = self.decisions.send(Msg::UpdateSession(id, Box::new(row)));
     }
 
-    /// Entrées perdues depuis le démarrage. Exposé par `mcpwall log --stats` et
-    /// par l'UI : « 47 entrées perdues aujourd'hui » est une information que
-    /// l'utilisateur a le droit d'avoir.
+    /// Entries lost since startup. Surfaced by `mcpwall log --stats` and by the
+    /// UI: "47 entries lost today" is information the user is entitled to have.
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
     }
 
-    /// Attend que tout ce qui a été soumis soit écrit.
+    /// Waits until everything submitted has been written.
     pub async fn flush(&self) {
         let (tx, rx) = oneshot::channel();
         if self.decisions.send(Msg::Flush(tx)).is_ok() {
@@ -186,14 +183,14 @@ impl Journal {
 }
 
 fn init_schema(conn: &Connection) -> Result<()> {
-    // WAL : lectures concurrentes pendant les écritures, indispensable pour que
-    // `log --tail` n'attende pas la tâche d'écriture.
-    // NORMAL plutôt que FULL : un fsync par transaction coûterait plus que ce
-    // que vaut la garantie, pour un journal d'audit local.
+    // WAL: concurrent reads during writes, essential so that `log --tail` does
+    // not wait on the writer task.
+    // NORMAL rather than FULL: one fsync per transaction would cost more than
+    // the guarantee is worth, for a local audit journal.
     conn.pragma_update(None, "journal_mode", "WAL")
-        .context("activation du WAL")?;
+        .context("enabling WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")
-        .context("réglage de synchronous")?;
+        .context("setting synchronous")?;
     conn.pragma_update(None, "foreign_keys", "ON").ok();
 
     conn.execute_batch(
@@ -229,7 +226,7 @@ fn init_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS entries_verdict  ON entries(verdict) WHERE verdict IS NOT NULL;
         "#,
     )
-    .context("création du schéma")?;
+    .context("creating the schema")?;
     Ok(())
 }
 
@@ -244,7 +241,7 @@ async fn writer_loop(
 
     loop {
         let msg = tokio::select! {
-            // Les décisions passent devant : elles sont rares et prioritaires.
+            // Decisions go first: they are rare and take priority.
             biased;
             Some(m) = decisions.recv() => Some(m),
             Some(m) = volume.recv() => Some(m),
@@ -261,9 +258,9 @@ async fn writer_loop(
             Msg::Entry(e) => {
                 let decision = e.is_decision();
                 pending.push(*e);
-                // Une décision n'attend pas le prochain lot : si le processus
-                // meurt dans les 200 ms, c'est précisément elle qu'il ne faut
-                // pas avoir perdue.
+                // A decision does not wait for the next batch: if the process
+                // dies within 200 ms, that is precisely the one we must not
+                // have lost.
                 if decision || pending.len() >= BATCH_MAX {
                     flush_pending(&mut conn, &mut pending);
                 }
@@ -276,7 +273,7 @@ async fn writer_loop(
             Msg::UpdateSession(id, row) => {
                 flush_pending(&mut conn, &mut pending);
                 if let Err(e) = update_session(&conn, id, &row) {
-                    tracing::warn!(erreur = %e, "mise à jour de session impossible");
+                    tracing::warn!(error = %e, "could not update session");
                 }
             }
             Msg::Flush(reply) => {
@@ -293,8 +290,8 @@ fn flush_pending(conn: &mut Connection, pending: &mut Vec<Entry>) {
     if pending.is_empty() {
         return;
     }
-    // Une transaction pour tout le lot : c'est ce qui rend l'écriture assez
-    // bon marché pour que les pertes restent théoriques.
+    // One transaction for the whole batch: that is what makes writing cheap
+    // enough for losses to stay theoretical.
     let result = (|| -> rusqlite::Result<()> {
         let tx = conn.transaction()?;
         {
@@ -321,9 +318,9 @@ fn flush_pending(conn: &mut Connection, pending: &mut Vec<Entry>) {
     })();
 
     if let Err(e) = result {
-        // On ne panique pas : le journal est un service, pas le produit. Perdre
-        // un lot est regrettable ; tuer la session de l'agent serait pire.
-        tracing::error!(erreur = %e, entrées = pending.len(), "écriture du journal impossible");
+        // We do not panic: the journal is a service, not the product. Losing a
+        // batch is regrettable; killing the agent's session would be worse.
+        tracing::error!(error = %e, entries = pending.len(), "could not write the journal");
     }
     pending.clear();
 }
@@ -375,10 +372,10 @@ fn update_session(conn: &Connection, id: i64, row: &SessionRow) -> rusqlite::Res
 }
 
 // ---------------------------------------------------------------------------
-// Lecture
+// Reading
 // ---------------------------------------------------------------------------
 
-/// Une ligne telle que la rend `mcpwall log`.
+/// A row as rendered by `mcpwall log`.
 #[derive(Debug, Clone)]
 pub struct LogLine {
     pub ts_ms: i64,
@@ -393,7 +390,7 @@ pub struct LogLine {
     pub bytes: i64,
 }
 
-/// Compteurs de `mcpwall log --stats`.
+/// Counters for `mcpwall log --stats`.
 #[derive(Debug, Clone, Default)]
 pub struct Stats {
     pub sessions: i64,
@@ -419,7 +416,7 @@ pub fn open_readonly(path: &Path) -> Result<Connection> {
         path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
     )
-    .with_context(|| format!("ouverture de {}", path.display()))?;
+    .with_context(|| format!("opening {}", path.display()))?;
     Ok(conn)
 }
 
@@ -450,14 +447,14 @@ pub fn tail(conn: &Connection, limit: i64, since_id: i64) -> Result<Vec<(i64, Lo
     })?;
 
     let mut out: Vec<(i64, LogLine)> = rows.collect::<rusqlite::Result<_>>()?;
-    out.reverse(); // ordre chronologique à l'affichage
+    out.reverse(); // chronological order for display
     Ok(out)
 }
 
-/// Compteurs du jour, pour le popover : (appels, bloqués, sessions actives).
+/// Today's counters, for the popover: (calls, blocked, active sessions).
 ///
-/// Lecture indépendante et en seule lecture : l'UI interroge fréquemment, et
-/// elle ne doit jamais pouvoir gêner la tâche d'écriture du shim.
+/// A separate, read-only query: the UI polls frequently, and must never be able
+/// to get in the way of the shim's writer task.
 pub fn today_counters(db: &Path) -> Result<(i64, i64, i64)> {
     if !db.exists() {
         return Ok((0, 0, 0));

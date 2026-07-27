@@ -1,4 +1,4 @@
-//! Serveur qui se comporte correctement.
+//! A server that behaves correctly.
 
 fn main() {
     while let Some(line) = testservers::read_line() {
@@ -15,7 +15,7 @@ fn main() {
             ("tools/list", Some(id)) => testservers::write_line(
                 &serde_json::json!({
                     "jsonrpc": "2.0", "id": id,
-                    "result": { "tools": [{ "name": "echo", "description": "renvoie son entrée" }] }
+                    "result": { "tools": [{ "name": "echo", "description": "echoes its input" }] }
                 })
                 .to_string(),
             ),
@@ -26,7 +26,7 @@ fn main() {
                 })
                 .to_string(),
             ),
-            // Les notifications n'attendent rien.
+            // Notifications expect nothing back.
             (_, None) => {}
             (_, Some(id)) => testservers::write_line(
                 &serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": {} }).to_string(),

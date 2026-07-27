@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// Emplacements partagés avec le core. Doivent rester alignés sur `ipc.rs`.
+/// Locations shared with the core. Must stay in step with `ipc.rs`.
 enum Paths {
     static var home: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -11,11 +11,11 @@ enum Paths {
     static var policy: URL { root.appendingPathComponent("policy.yaml") }
     static var journal: URL { root.appendingPathComponent("journal.db") }
 
-    /// Lien symbolique stable vers le binaire.
+    /// Stable symlink to the binary.
     ///
-    /// Les configurations MCP pointent vers **ce lien**, jamais vers le chemin
-    /// du bundle : sinon déplacer l'app depuis le Finder casserait tous les
-    /// serveurs MCP de l'utilisateur.
+    /// MCP configurations point at **this link**, never at the bundle path:
+    /// otherwise moving the app from the Finder would break every one of the
+    /// user's MCP servers.
     static var shimLink: URL { root.appendingPathComponent("bin/mcpwall") }
 }
 
@@ -35,8 +35,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
-        // `LSUIElement` dans l'Info.plist met déjà l'app hors du Dock ; on le
-        // pose aussi ici pour que `swift run` se comporte comme le bundle.
+        // `LSUIElement` in the Info.plist already keeps the app out of the
+        // Dock; we set it here too so `swift run` behaves like the bundle.
         app.setActivationPolicy(.accessory)
         app.run()
     }
@@ -62,7 +62,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         connection.start()
 
-        // Rafraîchissement des compteurs du popover.
+        // Refresh the popover counters.
         Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             self?.connection.requestStatus()
         }
@@ -74,12 +74,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         connection?.stop()
-        // Le daemon est un enfant de cette app : le laisser derrière soi serait
-        // exactement l'orphelin qu'on reproche aux autres.
+        // The daemon is a child of this app: leaving it behind would be exactly
+        // the orphan we criticise others for.
         supervisor?.stop()
     }
 
-    // MARK: - Barre de menus
+    // MARK: - Menu bar
 
     private func setUpStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -101,8 +101,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
-    /// Icône en image template : macOS l'inverse automatiquement en thème clair
-    /// et sombre, et on n'a pas deux jeux d'images à tenir synchronisés.
+    /// Template image icon: macOS inverts it automatically for light and dark
+    /// themes, and we do not have two image sets to keep in sync.
     private func refreshIcon() {
         guard let button = statusItem?.button else { return }
 
@@ -111,8 +111,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         image?.isTemplate = true
         button.image = image
 
-        // Badge chiffré uniquement s'il y a eu des blocages : au repos, la
-        // barre de menus doit rester silencieuse.
+        // A numbered badge only when there have been blocks: at rest, the menu
+        // bar must stay silent.
         button.title = model.status.blockedToday > 0 ? " \(model.status.blockedToday)" : ""
     }
 
@@ -126,7 +126,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    // MARK: - Messages du daemon
+    // MARK: - Daemon messages
 
     private func handle(_ message: ServerMessage) {
         switch message {
@@ -144,7 +144,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    // MARK: - Fenêtres
+    // MARK: - Windows
 
     private func showJournal() {
         popover.performClose(nil)
@@ -161,7 +161,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "Journal mcpwall"
+        window.title = "mcpwall Journal"
         window.center()
         window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(rootView: JournalView())
@@ -185,7 +185,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "Installer mcpwall"
+        window.title = "Install mcpwall"
         window.center()
         window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(
@@ -200,12 +200,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         onboardingWindow = window
     }
 
-    // MARK: - Binaire embarqué
+    // MARK: - Embedded binary
 
-    /// Le binaire du core, embarqué dans le bundle.
+    /// The core binary, embedded in the bundle.
     ///
-    /// En développement (`swift run`), on retombe sur la cible Cargo pour que
-    /// l'app soit utilisable sans avoir à assembler un bundle à chaque fois.
+    /// In development (`swift run`) we fall back to the Cargo target so the app
+    /// is usable without assembling a bundle every time.
     private func embeddedBinary() -> URL {
         if let path = Bundle.main.path(forResource: "mcpwall", ofType: nil) {
             return URL(fileURLWithPath: path)
@@ -224,10 +224,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return URL(fileURLWithPath: "/usr/local/bin/mcpwall")
     }
 
-    /// (Re)crée le lien symbolique stable vers le binaire embarqué.
+    /// (Re)creates the stable symlink to the embedded binary.
     ///
-    /// Refait à chaque lancement : c'est ce qui permet de déplacer l'app ou de
-    /// la mettre à jour sans que les configurations MCP cessent de fonctionner.
+    /// Remade on every launch: that is what lets the app be moved or updated
+    /// without the MCP configurations ceasing to work.
     private func installShimLink() {
         let fm = FileManager.default
         let link = Paths.shimLink
@@ -242,7 +242,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             try fm.createSymbolicLink(at: link, withDestinationURL: embeddedBinary())
         } catch {
-            NSLog("mcpwall: lien du shim non créé : \(error)")
+            NSLog("mcpwall: shim link not created: \(error)")
         }
     }
 
@@ -252,7 +252,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-/// État partagé avec les vues.
+/// State shared with the views.
 final class AppModel: ObservableObject {
     @Published var status = Status()
     @Published var daemonConnected = false

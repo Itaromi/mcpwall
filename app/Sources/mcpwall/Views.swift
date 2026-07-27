@@ -5,11 +5,11 @@ import SwiftUI
 // Popover
 // ---------------------------------------------------------------------------
 
-/// Contenu du clic gauche sur l'icône.
+/// What a left click on the icon shows.
 ///
-/// Volontairement pauvre : des compteurs, les dernières demandes, trois portes
-/// de sortie. Tout ce qui demande à être lu attentivement appartient à la
-/// fenêtre Journal, pas à un panneau qui se ferme dès qu'on regarde ailleurs.
+/// Deliberately sparse: some counters, the latest prompts, three ways out.
+/// Anything that needs careful reading belongs in the Journal window, not in a
+/// panel that closes the moment you look away.
 struct PopoverView: View {
     @ObservedObject var model: AppModel
     let actions: PopoverActions
@@ -33,7 +33,7 @@ struct PopoverView: View {
                 .foregroundStyle(model.daemonConnected ? Color.accentColor : .secondary)
             VStack(alignment: .leading, spacing: 1) {
                 Text("mcpwall").font(.headline)
-                Text(model.daemonConnected ? "actif" : "daemon injoignable")
+                Text(model.daemonConnected ? "active" : "daemon unreachable")
                     .font(.caption)
                     .foregroundStyle(model.daemonConnected ? Color.secondary : Color.orange)
             }
@@ -44,11 +44,11 @@ struct PopoverView: View {
 
     private var counters: some View {
         HStack(spacing: 0) {
-            counter("\(model.status.callsToday)", "appels")
+            counter("\(model.status.callsToday)", "calls")
             Divider().frame(height: 34)
-            counter("\(model.status.blockedToday)", "bloqués")
+            counter("\(model.status.blockedToday)", "blocked")
             Divider().frame(height: 34)
-            counter("\(model.status.activeSessions)", "serveurs")
+            counter("\(model.status.activeSessions)", "servers")
         }
         .padding(.vertical, 10)
     }
@@ -64,14 +64,14 @@ struct PopoverView: View {
     @ViewBuilder
     private var recent: some View {
         if model.recent.isEmpty {
-            Text("Aucune demande aujourd'hui.")
+            Text("No prompts today.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(12)
         } else {
             VStack(alignment: .leading, spacing: 6) {
-                Text("Dernières demandes")
+                Text("Latest prompts")
                     .font(.caption).foregroundStyle(.secondary)
                 ForEach(model.recent) { prompt in
                     HStack(spacing: 6) {
@@ -95,13 +95,13 @@ struct PopoverView: View {
 
     private var footer: some View {
         VStack(spacing: 0) {
-            // Le compteur de pertes n'est montré que s'il n'est pas nul : c'est
-            // un signal de bug, pas un régime normal, et l'utilisateur a le
-            // droit de savoir que son audit est incomplet.
+            // The loss counter is only shown when non-zero: it is a bug signal,
+            // not a normal regime, and the user is entitled to know their audit
+            // trail is incomplete.
             if model.status.droppedEntries > 0 {
                 HStack {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                    Text("\(model.status.droppedEntries) entrées de journal perdues")
+                    Text("\(model.status.droppedEntries) journal entries lost")
                         .font(.caption2)
                     Spacer()
                 }
@@ -111,12 +111,12 @@ struct PopoverView: View {
 
             HStack(spacing: 8) {
                 Button("Journal", action: actions.openJournal)
-                Button("Politique", action: actions.openPolicy)
+                Button("Policy", action: actions.openPolicy)
                 Spacer()
                 Menu {
-                    Button("Réinstaller dans les clients MCP…", action: actions.runOnboarding)
+                    Button("Reinstall into MCP clients…", action: actions.runOnboarding)
                     Divider()
-                    Button("Quitter mcpwall", action: actions.quit)
+                    Button("Quit mcpwall", action: actions.quit)
                 } label: {
                     Image(systemName: "ellipsis.circle")
                 }
@@ -146,12 +146,11 @@ struct JournalEntry: Identifiable, Hashable {
     let bytes: Int
 }
 
-/// Fenêtre Journal.
+/// The Journal window.
 ///
-/// Les données viennent de `mcpwall log --json` plutôt que d'un accès SQLite
-/// depuis Swift. Un seul chemin de lecture, déjà couvert par les tests du core,
-/// et aucun risque que l'interface tienne un verrou sur la base pendant que le
-/// shim écrit.
+/// The data comes from `mcpwall log --json` rather than from SQLite accessed
+/// via Swift. One read path, already covered by the core's tests, and no risk
+/// of the interface holding a lock on the database while the shim writes.
 struct JournalView: View {
     @State private var entries: [JournalEntry] = []
     @State private var filter = ""
@@ -164,15 +163,15 @@ struct JournalView: View {
             Divider()
             if let error {
                 ContentUnavailableView(
-                    "Journal illisible",
+                    "Journal unreadable",
                     systemImage: "exclamationmark.triangle",
                     description: Text(error)
                 )
             } else if filtered.isEmpty {
                 ContentUnavailableView(
-                    "Aucune entrée",
+                    "No entries",
                     systemImage: "tray",
-                    description: Text("Le trafic de vos serveurs MCP apparaîtra ici.")
+                    description: Text("Traffic from your MCP servers will appear here.")
                 )
             } else {
                 table
@@ -183,13 +182,13 @@ struct JournalView: View {
 
     private var toolbar: some View {
         HStack(spacing: 10) {
-            TextField("Filtrer par outil, serveur ou projet", text: $filter)
+            TextField("Filter by tool, server or project", text: $filter)
                 .textFieldStyle(.roundedBorder)
                 .frame(maxWidth: 320)
-            Toggle("Bloqués seulement", isOn: $onlyBlocked)
+            Toggle("Blocked only", isOn: $onlyBlocked)
                 .toggleStyle(.checkbox)
             Spacer()
-            Button("Exporter JSONL…", action: export)
+            Button("Export JSONL…", action: export)
             Button(action: reload) { Image(systemName: "arrow.clockwise") }
         }
         .padding(10)
@@ -197,7 +196,7 @@ struct JournalView: View {
 
     private var table: some View {
         Table(filtered) {
-            TableColumn("Heure") { e in
+            TableColumn("Time") { e in
                 Text(e.timestamp, format: .dateTime.hour().minute().second())
                     .font(.system(.caption, design: .monospaced))
             }
@@ -210,18 +209,18 @@ struct JournalView: View {
             }
             .width(20)
 
-            TableColumn("Méthode") { e in
+            TableColumn("Method") { e in
                 Text(e.method).font(.system(.caption, design: .monospaced))
             }
 
-            TableColumn("Serveur") { e in Text(e.server).font(.caption) }
-            TableColumn("Projet") { e in
-                Text(e.scope).font(.caption).help("provenance : \(e.scopeSource)")
+            TableColumn("Server") { e in Text(e.server).font(.caption) }
+            TableColumn("Project") { e in
+                Text(e.scope).font(.caption).help("provenance: \(e.scopeSource)")
             }
 
             TableColumn("Verdict") { e in
                 if let verdict = e.verdict, verdict == "deny" {
-                    Label(e.rule ?? "bloqué", systemImage: "hand.raised.fill")
+                    Label(e.rule ?? "blocked", systemImage: "hand.raised.fill")
                         .font(.caption)
                         .foregroundStyle(.red)
                 } else {
@@ -277,7 +276,7 @@ struct JournalView: View {
         return JournalEntry(
             timestamp: Date(timeIntervalSince1970: ts / 1000),
             direction: dict["direction"] as? String ?? "",
-            method: dict["method"] as? String ?? "(réponse)",
+            method: dict["method"] as? String ?? "(response)",
             disposition: dict["disposition"] as? String ?? "",
             verdict: dict["verdict"] as? String,
             rule: dict["rule"] as? String,
@@ -293,11 +292,11 @@ struct JournalView: View {
 // Onboarding
 // ---------------------------------------------------------------------------
 
-/// Premier lancement.
+/// First launch.
 ///
-/// **Critère de réussite : zéro terminal.** Si l'utilisateur doit copier-coller
-/// du JSON après avoir monté le `.dmg`, l'onboarding a échoué. Le diff est
-/// montré avant toute écriture, et un bouton unique remet tout en état.
+/// **Success criterion: zero terminal.** If the user has to copy-paste JSON
+/// after mounting the `.dmg`, onboarding has failed. The diff is shown before
+/// any write, and a single button puts everything back.
 struct OnboardingView: View {
     let binary: URL
     let onDone: () -> Void
@@ -310,19 +309,19 @@ struct OnboardingView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 6) {
-                Text("Installer mcpwall dans vos clients MCP")
+                Text("Install mcpwall into your MCP clients")
                     .font(.title2).bold()
-                Text("mcpwall va envelopper les serveurs MCP déclarés dans vos configurations. "
-                     + "Rien n'est écrit avant que vous ayez lu ce qui va changer, et tout est "
-                     + "réversible en un clic.")
+                Text("mcpwall will wrap the MCP servers declared in your configurations. "
+                     + "Nothing is written before you have read what will change, and "
+                     + "everything is reversible in one click.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            GroupBox("Ce qui va changer") {
+            GroupBox("What will change") {
                 ScrollView {
-                    Text(preview.isEmpty ? "Analyse en cours…" : preview)
+                    Text(preview.isEmpty ? "Analysing…" : preview)
                         .font(.system(.caption, design: .monospaced))
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -339,7 +338,7 @@ struct OnboardingView: View {
 
             if applied {
                 Label(
-                    "Terminé. Redémarrez vos clients MCP pour que la configuration prenne effet.",
+                    "Done. Restart your MCP clients for the configuration to take effect.",
                     systemImage: "checkmark.circle.fill"
                 )
                 .font(.callout)
@@ -347,11 +346,11 @@ struct OnboardingView: View {
             }
 
             HStack {
-                Button("Tout remettre en état", action: restore)
+                Button("Put everything back", action: restore)
                     .disabled(working)
                 Spacer()
-                Button("Plus tard", action: onDone)
-                Button(applied ? "Fermer" : "Installer") {
+                Button("Later", action: onDone)
+                Button(applied ? "Close" : "Install") {
                     if applied { onDone() } else { apply() }
                 }
                 .keyboardShortcut(.defaultAction)
@@ -408,21 +407,21 @@ struct OnboardingView: View {
 }
 
 // ---------------------------------------------------------------------------
-// Appel du core
+// Calling the core
 // ---------------------------------------------------------------------------
 
-/// Exécute une sous-commande du binaire mcpwall.
+/// Runs a subcommand of the mcpwall binary.
 ///
-/// L'interface ne réimplémente jamais ce que le core sait faire : lire le
-/// journal, calculer un diff d'installation, restaurer des sauvegardes. Une
-/// seule implémentation, déjà testée, et pas de dérive entre ce que la ligne de
-/// commande fait et ce que l'app affiche.
+/// The interface never reimplements what the core already does: reading the
+/// journal, computing an install diff, restoring backups. One implementation,
+/// already tested, and no drift between what the command line does and what the
+/// app displays.
 enum CoreCommand {
     struct Failure: LocalizedError {
         let code: Int32
         let message: String
         var errorDescription: String? {
-            message.isEmpty ? "le core a échoué (code \(code))" : message
+            message.isEmpty ? "the core failed (code \(code))" : message
         }
     }
 

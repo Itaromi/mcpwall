@@ -1,9 +1,9 @@
-//! Tests du flux de confirmation.
+//! Confirmation flow tests.
 //!
-//! C'est la mécanique que le panneau de décision de l'app pilote. Les cas qui
-//! comptent ne sont pas « l'utilisateur clique autoriser » — c'est ce qui se
-//! passe quand il ne clique pas, quand l'interface meurt, ou quand elle demande
-//! plus que ce que la provenance du scope permet.
+//! This is the machinery the app's decision panel drives. The cases that matter
+//! are not "the user clicks allow" — they are what happens when they do not
+//! click, when the interface dies, or when it asks for more than the scope's
+//! provenance permits.
 
 use std::io::{BufRead, BufReader, Lines, Write};
 use std::os::unix::net::UnixStream;
@@ -17,11 +17,11 @@ fn mcpwall() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_mcpwall"))
 }
 
-/// Répertoire court : `sun_path` ne fait que 104 octets sur macOS.
+/// A short directory: `sun_path` is only 104 bytes on macOS.
 fn workdir(tag: &str) -> PathBuf {
     let d = PathBuf::from(format!("/tmp/mwa-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).expect("répertoire");
+    std::fs::create_dir_all(&d).expect("directory");
     d
 }
 
@@ -34,7 +34,7 @@ rules:
       arg_path_matches: ["**/.env"]
     action: ask
     severity: high
-    message: "accès à un fichier de secrets"
+    message: "access to a secrets file"
 overrides: []
 "#;
 
@@ -44,7 +44,7 @@ struct Harness {
     dir: PathBuf,
 }
 
-/// Une connexion au daemon, après handshake.
+/// A connection to the daemon, post-handshake.
 struct Conn {
     write: UnixStream,
     lines: Lines<BufReader<UnixStream>>,
@@ -52,7 +52,7 @@ struct Conn {
 
 impl Conn {
     fn send(&mut self, v: Value) {
-        writeln!(self.write, "{v}").expect("envoi");
+        writeln!(self.write, "{v}").expect("send");
         self.write.flush().ok();
     }
 
@@ -67,7 +67,7 @@ impl Harness {
         let dir = workdir(tag);
         let socket = dir.join("d.sock");
         let policy_path = dir.join("policy.yaml");
-        std::fs::write(&policy_path, policy).expect("politique");
+        std::fs::write(&policy_path, policy).expect("policy");
 
         let child = Command::new(mcpwall())
             .args(["--db".as_ref(), dir.join("j.db").as_os_str()])
@@ -83,13 +83,13 @@ impl Harness {
         while !socket.exists() && start.elapsed() < Duration::from_secs(10) {
             std::thread::sleep(Duration::from_millis(25));
         }
-        assert!(socket.exists(), "socket non créé");
+        assert!(socket.exists(), "socket not created");
 
         Self { child, socket, dir }
     }
 
     fn connect(&self) -> Conn {
-        let stream = UnixStream::connect(&self.socket).expect("connexion");
+        let stream = UnixStream::connect(&self.socket).expect("connect");
         stream
             .set_read_timeout(Some(Duration::from_secs(20)))
             .expect("timeout");
@@ -101,19 +101,19 @@ impl Harness {
             r#"{{"mcpwall_ipc": 2, "build": "test"}}"#
         )
         .expect("hello");
-        let hello = lines.next().expect("hello daemon").expect("ligne");
+        let hello = lines.next().expect("daemon hello").expect("line");
         let v: Value = serde_json::from_str(&hello).expect("json");
         assert_eq!(v["mcpwall_ipc"], 2);
 
         Conn { write, lines }
     }
 
-    /// Connexion d'interface, abonnée aux demandes.
+    /// An interface connection, subscribed to prompts.
     fn ui(&self) -> Conn {
         let mut c = self.connect();
         c.send(json!({"type": "subscribe"}));
-        // Laisser le daemon enregistrer l'abonnement avant qu'un shim ne
-        // demande : sinon on teste une course, pas le comportement.
+        // Let the daemon register the subscription before a shim asks:
+        // otherwise we are testing a race, not the behaviour.
         std::thread::sleep(Duration::from_millis(150));
         c
     }
@@ -145,22 +145,21 @@ impl Drop for Harness {
     }
 }
 
-// --- Le chemin nominal ---
+// --- The nominal path ---
 
 #[test]
-fn une_demande_atteint_linterface_avec_de_quoi_decider() {
+fn a_prompt_reaches_the_interface_with_enough_to_decide_on() {
     let h = Harness::start("prompt", POLICY);
     let mut ui = h.ui();
     let mut shim = h.connect();
 
     shim.send(Harness::decide_request("injected"));
 
-    let prompt = ui.recv().expect("demande");
+    let prompt = ui.recv().expect("prompt");
     assert_eq!(prompt["type"], "prompt");
 
-    // Tout ce qu'il faut pour décider sans aller chercher ailleurs. Si
-    // l'utilisateur doit ouvrir le journal pour comprendre, il cliquera
-    // « autoriser » à la place.
+    // Everything needed to decide without looking elsewhere. If the user has to
+    // open the journal to understand, they will click "allow" instead.
     assert_eq!(prompt["tool"], "read_file");
     assert_eq!(prompt["server"], "srv");
     assert_eq!(prompt["rule"], "secrets_paths");
@@ -168,7 +167,7 @@ fn une_demande_atteint_linterface_avec_de_quoi_decider() {
     assert_eq!(prompt["scope_key"], "project:/p");
     assert!(
         prompt["preview"].as_str().unwrap_or("").contains(".env"),
-        "l'extrait doit montrer l'argument : {prompt}"
+        "the excerpt must show the argument: {prompt}"
     );
     assert_eq!(prompt["forever_allowed"], true);
     assert_eq!(prompt["timeout_seconds"], 3);
@@ -186,8 +185,8 @@ fn une_demande_atteint_linterface_avec_de_quoi_decider() {
 }
 
 #[test]
-fn un_refus_de_lutilisateur_bloque() {
-    let h = Harness::start("refus", POLICY);
+fn a_refusal_from_the_user_blocks() {
+    let h = Harness::start("refusal", POLICY);
     let mut ui = h.ui();
     let mut shim = h.connect();
 
@@ -207,19 +206,19 @@ fn un_refus_de_lutilisateur_bloque() {
         verdict["message"]
             .as_str()
             .unwrap_or("")
-            .contains("refusé par l'utilisateur"),
+            .contains("denied by the user"),
         "{verdict}"
     );
 }
 
-// --- Quand personne ne répond ---
+// --- When nobody answers ---
 
 #[test]
-fn sans_interface_une_demande_est_refusee_et_le_dit() {
-    // Pas d'UI abonnée : personne ne peut confirmer. On refuse plutôt que
-    // d'autoriser en silence, mais l'agent doit comprendre pourquoi — sinon il
-    // conclut à une panne de l'outil et réessaie en boucle.
-    let h = Harness::start("sans-ui", POLICY);
+fn with_no_interface_a_prompt_is_refused_and_says_so() {
+    // No UI subscribed: nobody can confirm. We refuse rather than allow
+    // silently, but the agent must understand why — otherwise it concludes the
+    // tool is broken and retries in a loop.
+    let h = Harness::start("no-ui", POLICY);
     let mut shim = h.connect();
 
     shim.send(Harness::decide_request("injected"));
@@ -227,11 +226,11 @@ fn sans_interface_une_demande_est_refusee_et_le_dit() {
 
     assert_eq!(verdict["outcome"], "deny");
     let msg = verdict["message"].as_str().unwrap_or("");
-    assert!(msg.contains("aucune interface"), "{msg}");
+    assert!(msg.contains("no interface"), "{msg}");
 }
 
 #[test]
-fn une_demande_sans_reponse_expire_en_refus() {
+fn an_unanswered_prompt_expires_into_a_refusal() {
     let h = Harness::start("timeout", POLICY);
     let mut ui = h.ui();
     let mut shim = h.connect();
@@ -239,35 +238,38 @@ fn une_demande_sans_reponse_expire_en_refus() {
     let start = Instant::now();
     shim.send(Harness::decide_request("injected"));
 
-    let prompt = ui.recv().expect("demande");
+    let prompt = ui.recv().expect("prompt");
     assert_eq!(prompt["type"], "prompt");
 
-    // On ne répond pas. `ask_timeout_seconds: 3`.
+    // We do not answer. `ask_timeout_seconds: 3`.
     let verdict = shim.recv().expect("verdict");
     assert_eq!(verdict["outcome"], "deny");
     assert!(
-        verdict["message"].as_str().unwrap_or("").contains("délai"),
+        verdict["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("timed out"),
         "{verdict}"
     );
 
     let d = start.elapsed();
-    assert!(d >= Duration::from_secs(3), "expiré trop tôt : {d:?}");
-    assert!(d < Duration::from_secs(15), "expiré trop tard : {d:?}");
+    assert!(d >= Duration::from_secs(3), "expired too early: {d:?}");
+    assert!(d < Duration::from_secs(15), "expired too late: {d:?}");
 }
 
 #[test]
-fn une_demande_expiree_est_retiree_de_linterface() {
-    // Sans ce retrait, le panneau resterait affiché avec des boutons qui ne
-    // feraient plus rien — l'utilisateur croirait avoir décidé.
+fn an_expired_prompt_is_withdrawn_from_the_interface() {
+    // Without this withdrawal, the panel would stay up with buttons that no
+    // longer do anything — and the user would believe they had decided.
     let h = Harness::start("withdraw", POLICY);
     let mut ui = h.ui();
     let mut shim = h.connect();
 
     shim.send(Harness::decide_request("injected"));
-    let prompt = ui.recv().expect("demande");
+    let prompt = ui.recv().expect("prompt");
     let id = prompt["prompt_id"].clone();
 
-    let withdraw = ui.recv().expect("retrait");
+    let withdraw = ui.recv().expect("withdrawal");
     assert_eq!(withdraw["type"], "withdraw");
     assert_eq!(withdraw["prompt_id"], id);
 
@@ -275,18 +277,18 @@ fn une_demande_expiree_est_retiree_de_linterface() {
 }
 
 #[test]
-fn une_reponse_tardive_est_ignoree_sans_casse() {
-    let h = Harness::start("tardif", POLICY);
+fn a_late_answer_is_ignored_without_damage() {
+    let h = Harness::start("late", POLICY);
     let mut ui = h.ui();
     let mut shim = h.connect();
 
     shim.send(Harness::decide_request("injected"));
-    let prompt = ui.recv().expect("demande");
-    let _ = ui.recv(); // le retrait
-    let _ = shim.recv(); // le refus par expiration
+    let prompt = ui.recv().expect("prompt");
+    let _ = ui.recv(); // the withdrawal
+    let _ = shim.recv(); // the refusal by expiry
 
-    // L'utilisateur clique après coup. Rien ne doit se casser, et surtout la
-    // décision ne doit pas être enregistrée pour la suite.
+    // The user clicks after the fact. Nothing may break, and above all the
+    // decision must not be recorded for later.
     ui.send(json!({
         "type": "answer",
         "prompt_id": prompt["prompt_id"],
@@ -295,20 +297,20 @@ fn une_reponse_tardive_est_ignoree_sans_casse() {
     }));
 
     shim.send(Harness::decide_request("injected"));
-    let prompt2 = ui.recv().expect("une nouvelle demande doit être posée");
+    let prompt2 = ui.recv().expect("a fresh prompt must be raised");
     assert_eq!(prompt2["type"], "prompt");
 }
 
-// --- Les portées ---
+// --- Scopes ---
 
 #[test]
-fn une_decision_de_session_evite_de_redemander() {
+fn a_session_decision_avoids_asking_again() {
     let h = Harness::start("session", POLICY);
     let mut ui = h.ui();
     let mut shim = h.connect();
 
     shim.send(Harness::decide_request("injected"));
-    let prompt = ui.recv().expect("demande");
+    let prompt = ui.recv().expect("prompt");
     ui.send(json!({
         "type": "answer",
         "prompt_id": prompt["prompt_id"],
@@ -317,7 +319,7 @@ fn une_decision_de_session_evite_de_redemander() {
     }));
     assert_eq!(shim.recv().expect("verdict")["outcome"], "allow");
 
-    // Deuxième appel identique : autorisé sans redemander.
+    // Second identical call: allowed without asking again.
     shim.send(Harness::decide_request("injected"));
     let verdict = shim.recv().expect("verdict");
     assert_eq!(verdict["outcome"], "allow");
@@ -325,33 +327,33 @@ fn une_decision_de_session_evite_de_redemander() {
 }
 
 #[test]
-fn une_decision_once_fait_redemander() {
-    // `once` ne vaut que pour cet appel. Le confondre avec `session`
-    // accorderait silencieusement plus que ce que l'utilisateur a coché.
+fn a_once_decision_makes_us_ask_again() {
+    // `once` applies to this call only. Confusing it with `session` would
+    // silently grant more than the user ticked.
     let h = Harness::start("once", POLICY);
     let mut ui = h.ui();
     let mut shim = h.connect();
 
     shim.send(Harness::decide_request("injected"));
-    let p1 = ui.recv().expect("demande");
+    let p1 = ui.recv().expect("prompt");
     ui.send(json!({"type":"answer","prompt_id":p1["prompt_id"],"allow":true,"until":"once"}));
     assert_eq!(shim.recv().expect("verdict")["outcome"], "allow");
 
     shim.send(Harness::decide_request("injected"));
-    let p2 = ui.recv().expect("une seconde demande est attendue");
+    let p2 = ui.recv().expect("a second prompt is expected");
     assert_eq!(p2["type"], "prompt");
     ui.send(json!({"type":"answer","prompt_id":p2["prompt_id"],"allow":false,"until":"once"}));
     assert_eq!(shim.recv().expect("verdict")["outcome"], "deny");
 }
 
 #[test]
-fn forever_est_persiste_dans_la_politique() {
+fn forever_is_persisted_into_the_policy() {
     let h = Harness::start("forever", POLICY);
     let mut ui = h.ui();
     let mut shim = h.connect();
 
     shim.send(Harness::decide_request("injected"));
-    let prompt = ui.recv().expect("demande");
+    let prompt = ui.recv().expect("prompt");
     ui.send(json!({
         "type": "answer",
         "prompt_id": prompt["prompt_id"],
@@ -360,38 +362,38 @@ fn forever_est_persiste_dans_la_politique() {
     }));
     assert_eq!(shim.recv().expect("verdict")["outcome"], "allow");
 
-    // L'écriture est asynchrone par rapport au verdict.
+    // The write is asynchronous with respect to the verdict.
     std::thread::sleep(Duration::from_millis(300));
-    let yaml = std::fs::read_to_string(h.dir.join("policy.yaml")).expect("politique");
+    let yaml = std::fs::read_to_string(h.dir.join("policy.yaml")).expect("policy");
 
     assert!(
         yaml.contains("project:/p"),
-        "override non persisté : {yaml}"
+        "override not persisted: {yaml}"
     );
     assert!(yaml.contains("read_file"), "{yaml}");
     assert!(yaml.contains("until: forever"), "{yaml}");
-    // Les commentaires de l'utilisateur survivent : on ajoute, on ne réécrit pas.
+    // The user's comments survive: we append, we do not rewrite.
     assert!(
         yaml.contains("ask_timeout_seconds: 3"),
-        "le fichier a été réécrit au lieu d'être complété : {yaml}"
+        "the file was rewritten instead of appended to: {yaml}"
     );
 }
 
 #[test]
-fn forever_est_retrograde_sur_un_scope_non_fiable() {
-    // Le contrôle central : l'interface est un client, pas une autorité. Si la
-    // provenance du scope ne permet pas `forever`, le daemon rétrograde même
-    // quand l'UI l'a demandé — sinon une permission permanente accordée sur un
-    // cwd fuirait vers d'autres projets.
-    let h = Harness::start("degrade", POLICY);
+fn forever_is_downgraded_on_an_untrusted_scope() {
+    // The central check: the interface is a client, not an authority. If the
+    // scope's provenance does not permit `forever`, the daemon downgrades even
+    // when the UI asked for it — otherwise a permanent permission granted on a
+    // cwd would leak into other projects.
+    let h = Harness::start("downgrade", POLICY);
     let mut ui = h.ui();
     let mut shim = h.connect();
 
     shim.send(Harness::decide_request("cwd"));
-    let prompt = ui.recv().expect("demande");
+    let prompt = ui.recv().expect("prompt");
     assert_eq!(
         prompt["forever_allowed"], false,
-        "l'UI ne doit pas proposer `forever` ici"
+        "the UI must not offer `forever` here"
     );
 
     ui.send(json!({
@@ -403,22 +405,22 @@ fn forever_est_retrograde_sur_un_scope_non_fiable() {
     assert_eq!(shim.recv().expect("verdict")["outcome"], "allow");
 
     std::thread::sleep(Duration::from_millis(300));
-    let yaml = std::fs::read_to_string(h.dir.join("policy.yaml")).expect("politique");
+    let yaml = std::fs::read_to_string(h.dir.join("policy.yaml")).expect("policy");
     assert!(
         !yaml.contains("project:/p"),
-        "une décision permanente a été écrite sur un scope non fiable : {yaml}"
+        "a permanent decision was written for an untrusted scope: {yaml}"
     );
 }
 
-// --- État pour le popover ---
+// --- State for the popover ---
 
 #[test]
-fn linterface_peut_demander_letat() {
+fn the_interface_can_ask_for_the_state() {
     let h = Harness::start("status", POLICY);
     let mut ui = h.ui();
 
     ui.send(json!({"type": "status"}));
-    let st = ui.recv().expect("état");
+    let st = ui.recv().expect("state");
 
     assert_eq!(st["type"], "status");
     assert_eq!(st["ui_connected"], true);
@@ -431,13 +433,13 @@ fn linterface_peut_demander_letat() {
 }
 
 #[test]
-fn une_interface_deconnectee_ne_bloque_pas_les_shims() {
-    // L'app peut être fermée à tout moment. Les demandes redeviennent des refus
-    // expliqués, mais rien ne doit rester suspendu.
-    let h = Harness::start("ui-morte", POLICY);
+fn a_disconnected_interface_does_not_stall_the_shims() {
+    // The app can be closed at any moment. Prompts revert to explained
+    // refusals, but nothing may be left hanging.
+    let h = Harness::start("ui-dead", POLICY);
     {
         let _ui = h.ui();
-    } // l'UI se déconnecte ici
+    } // the UI disconnects here
     std::thread::sleep(Duration::from_millis(200));
 
     let mut shim = h.connect();
@@ -448,28 +450,28 @@ fn une_interface_deconnectee_ne_bloque_pas_les_shims() {
     assert_eq!(verdict["outcome"], "deny");
     assert!(
         start.elapsed() < Duration::from_secs(2),
-        "le shim a attendu une UI absente : {:?}",
+        "the shim waited on an absent UI: {:?}",
         start.elapsed()
     );
 }
 
-// --- Le délai du shim ---
+// --- The shim's timeout ---
 
 #[test]
-fn le_shim_attend_que_lutilisateur_ait_repondu() {
-    // Le défaut le plus dangereux trouvé en M2, et invisible tant que
-    // l'interface n'existait pas : le shim abandonnait au bout de 5 secondes
-    // avec son propre délai de socket, pendant que le daemon attendait encore
-    // le clic. Or abandonner **laisse passer** — toute règle `ask` se
-    // dégradait donc en `allow` dès que la personne réfléchissait plus de cinq
-    // secondes, ce qui est le cas normal quand on lit une demande.
+fn the_shim_waits_until_the_user_has_answered() {
+    // The most dangerous defect found in M2, and invisible for as long as the
+    // interface did not exist: the shim gave up after 5 seconds on its own
+    // socket timeout while the daemon was still waiting for the click. And
+    // giving up **lets the call through** — so every `ask` rule decayed into
+    // `allow` as soon as the person thought for more than five seconds, which
+    // is the normal case when reading a prompt.
     //
-    // Le daemon annonce son délai dans le hello ; le shim en dérive le sien.
+    // The daemon announces its timeout in the hello; the shim derives its own.
     let policy = POLICY.replace("ask_timeout_seconds: 3", "ask_timeout_seconds: 30");
-    let h = Harness::start("shim-attend", &policy);
+    let h = Harness::start("shim-waits", &policy);
     let mut ui = h.ui();
 
-    // Le vrai shim, pas une simulation : c'est son client qui est en cause.
+    // The real shim, not a simulation: its client is what is under test.
     let mut shim = Command::new(mcpwall())
         .args(["--db".as_ref(), h.dir.join("j.db").as_os_str()])
         .arg("wrap")
@@ -496,11 +498,11 @@ fn le_shim_attend_que_lutilisateur_ait_repondu() {
         let _ = si.write_all(input.as_bytes());
     }
 
-    let prompt = ui.recv().expect("demande");
+    let prompt = ui.recv().expect("prompt");
     assert_eq!(prompt["type"], "prompt");
 
-    // L'utilisateur prend son temps — bien au-delà des 5 secondes de l'ancien
-    // délai codé en dur.
+    // The user takes their time — well past the 5 seconds of the old hard-coded
+    // timeout.
     std::thread::sleep(Duration::from_secs(8));
     ui.send(json!({
         "type": "answer",
@@ -509,7 +511,7 @@ fn le_shim_attend_que_lutilisateur_ait_repondu() {
         "until": "once"
     }));
 
-    let out = shim.wait_with_output().expect("attente du shim");
+    let out = shim.wait_with_output().expect("waiting for the shim");
     let text = String::from_utf8_lossy(&out.stdout);
     let responses: std::collections::BTreeMap<i64, Value> = text
         .lines()
@@ -517,17 +519,17 @@ fn le_shim_attend_que_lutilisateur_ait_repondu() {
         .filter_map(|v| Some((v.get("id")?.as_i64()?, v)))
         .collect();
 
-    let denied = responses.get(&2).expect("réponse à l'appel");
+    let denied = responses.get(&2).expect("response to the call");
     assert_eq!(
         denied["result"]["isError"], true,
-        "le refus tardif de l'utilisateur doit être respecté, pas contourné par \
-         un abandon du shim : {text}"
+        "the user's late refusal must be honoured, not bypassed by the shim \
+         giving up: {text}"
     );
     assert!(
         denied["result"]["content"][0]["text"]
             .as_str()
             .unwrap_or("")
-            .contains("refusé par l'utilisateur"),
+            .contains("denied by the user"),
         "{text}"
     );
 }

@@ -1,22 +1,21 @@
-//! Client du daemon, côté shim.
+//! Daemon client, shim side.
 //!
-//! Implémente [`DecisionPoint`] par-dessus le socket Unix. C'est le seul
-//! endroit où mcpwall peut casser la session d'un utilisateur pour une raison
-//! qui ne le regarde pas — un daemon arrêté, une mise à jour en cours — donc
-//! c'est ici que la règle de disponibilité §4 s'applique le plus littéralement.
+//! Implements [`DecisionPoint`] over the Unix socket. This is the one place
+//! where mcpwall can break a user's session for a reason that is none of their
+//! business — a stopped daemon, an update in flight — so this is where the
+//! availability rule of §4 applies most literally.
 //!
-//! ## Pourquoi un thread système et pas une tâche
+//! ## Why a system thread and not a task
 //!
-//! Retenir une frame avant qu'elle n'atteigne l'amont impose que le verdict
-//! soit rendu **avant** que le relais poursuive : le point de décision est donc
-//! synchrone, appelé depuis le corps d'une pompe async. Si l'I/O du socket
-//! vivait sur le même exécuteur, l'attente du verdict bloquerait la tâche qui
-//! doit produire ce verdict — un interblocage garanti sur un runtime
-//! mono-thread.
+//! Holding a frame back before it reaches the upstream requires the verdict to
+//! be produced **before** the relay continues: the decision point is therefore
+//! synchronous, called from the body of an async pump. If the socket I/O lived
+//! on the same executor, waiting for the verdict would block the very task that
+//! has to produce it — a guaranteed deadlock on a single-threaded runtime.
 //!
-//! La connexion vit donc sur un thread système dédié, en I/O bloquante, et le
-//! dialogue passe par des canaux `std`. Le relais bloque son thread, le socket
-//! progresse sur le sien.
+//! The connection therefore lives on a dedicated system thread, in blocking
+//! I/O, and the conversation goes through `std` channels. The relay blocks its
+//! thread, the socket makes progress on its own.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -29,34 +28,34 @@ use crate::ipc::{ClientMessage, DecideRequest, DecideResponse, Hello, Outcome, S
 use crate::mcp::{CallContext, DecisionError, DecisionPoint, Verdict};
 use crate::scope::Scope;
 
-/// Délai d'attente d'un verdict quand le daemon n'annonce rien.
+/// How long to wait for a verdict when the daemon announces nothing.
 ///
-/// Filet de sécurité pour un daemon vivant mais bloqué, cas que le handshake ne
-/// détecte pas. Il ne doit **jamais** être plus court que le temps qu'un
-/// utilisateur met à répondre à une demande de confirmation : abandonner trop
-/// tôt fait passer l'appel, donc transforme une règle `ask` en `allow` dès que
-/// la personne réfléchit. D'où la dérivation à partir du délai annoncé par le
-/// daemon dans son hello, et cette valeur seulement en dernier recours.
+/// A safety net for a daemon that is alive but stuck, a case the handshake does
+/// not catch. It must **never** be shorter than the time a user takes to answer
+/// a confirmation prompt: giving up too early lets the call through, and so
+/// turns an `ask` rule into `allow` as soon as the person stops to think. Hence
+/// deriving it from the timeout the daemon announces in its hello, and using
+/// this value only as a last resort.
 const FALLBACK_TIMEOUT: Duration = Duration::from_secs(180);
 
-/// Marge ajoutée au délai annoncé par le daemon.
+/// Margin added to the timeout announced by the daemon.
 ///
-/// Le daemon garantit une réponse dans son propre délai ; la marge couvre le
-/// trajet et l'ordonnancement, pas l'hésitation de l'utilisateur.
+/// The daemon guarantees an answer within its own timeout; the margin covers
+/// transit and scheduling, not the user's hesitation.
 const TIMEOUT_MARGIN: Duration = Duration::from_secs(30);
 
 type Pending = (DecideRequest, mpsc::Sender<Option<DecideResponse>>);
 
 pub struct DaemonClient {
     tx: mpsc::Sender<Pending>,
-    /// Le daemon a-t-il déjà été jugé injoignable ?
+    /// Has the daemon already been judged unreachable?
     ///
-    /// Un shim qui a perdu le daemon ne retente pas à chaque appel : ce serait
-    /// payer un timeout par outil pour rien.
+    /// A shim that has lost the daemon does not retry on every call: that would
+    /// mean paying one timeout per tool for nothing.
     degraded: AtomicBool,
     fail_closed: bool,
     session: SessionInfo,
-    /// Dérivé du hello du daemon.
+    /// Derived from the daemon's hello.
     timeout: Duration,
 }
 
@@ -82,27 +81,27 @@ impl SessionInfo {
 }
 
 impl DaemonClient {
-    /// Se connecte et effectue le handshake.
+    /// Connects and performs the handshake.
     ///
-    /// Rend `None` si le daemon est absent ou parle une autre version : le
-    /// shim relaie alors sans politique. C'est un mode dégradé assumé, pas une
-    /// erreur — l'app peut être fermée, et fermer l'app ne doit pas paralyser
-    /// les serveurs MCP de l'utilisateur.
+    /// Returns `None` if the daemon is absent or speaks another version: the
+    /// shim then relays without policy. That is an accepted degraded mode, not
+    /// an error — the app may be closed, and closing the app must not paralyse
+    /// the user's MCP servers.
     pub fn connect(socket: &Path, fail_closed: bool, session: SessionInfo) -> Option<Self> {
         let stream = match UnixStream::connect(socket) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(
                     socket = %socket.display(),
-                    erreur = %e,
-                    "daemon injoignable — relais sans politique"
+                    error = %e,
+                    "daemon unreachable — relaying without policy"
                 );
                 return None;
             }
         };
-        // Court pendant le handshake : un daemon qui n'y répond pas est mort,
-        // il n'y a personne à attendre. Le délai est rallongé juste après, une
-        // fois qu'on sait combien de temps un verdict peut prendre.
+        // Short during the handshake: a daemon that does not answer it is dead,
+        // there is nobody to wait for. The timeout is extended right after,
+        // once we know how long a verdict may take.
         stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
         stream
             .set_write_timeout(Some(Duration::from_secs(5)))
@@ -119,22 +118,22 @@ impl DaemonClient {
         let peer: Hello = serde_json::from_str(&reply).ok()?;
 
         if !peer.compatible() {
-            // Visible exprès : c'est le cas du client MCP resté ouvert pendant
-            // une mise à jour, et l'utilisateur doit comprendre pourquoi son
-            // pare-feu ne filtre plus.
+            // Deliberately loud: this is the MCP client left open across an
+            // update, and the user needs to understand why their firewall has
+            // stopped filtering.
             tracing::error!(
                 shim = mine.mcpwall_ipc,
                 daemon = peer.mcpwall_ipc,
-                build_daemon = %peer.build,
-                "version IPC incompatible — mcpwall NE FILTRE PAS cette session. \
-                 Redémarrez le client MCP pour reprendre un shim à jour."
+                daemon_build = %peer.build,
+                "incompatible IPC version — mcpwall IS NOT FILTERING this session. \
+                 Restart the MCP client to pick up an up-to-date shim."
             );
             return None;
         }
 
-        // Le daemon annonce le temps qu'il peut mettre à répondre — il attend
-        // l'utilisateur, pas la machine. Abandonner avant lui ferait passer
-        // l'appel en silence.
+        // The daemon announces how long it may take to answer — it is waiting
+        // on the user, not on the machine. Giving up before it does would let
+        // the call through silently.
         let timeout = peer
             .ask_timeout_seconds
             .map(|s| Duration::from_secs(s) + TIMEOUT_MARGIN)
@@ -143,8 +142,8 @@ impl DaemonClient {
 
         let (tx, rx) = mpsc::channel::<Pending>();
 
-        // Un seul thread possède la connexion : les requêtes sont sérialisées
-        // naturellement, sans verrou.
+        // A single thread owns the connection: requests are serialised
+        // naturally, with no lock.
         std::thread::Builder::new()
             .name("mcpwall-ipc".into())
             .spawn(move || {
@@ -155,17 +154,17 @@ impl DaemonClient {
                         writeln!(write, "{payload}").ok()?;
                         write.flush().ok()?;
 
-                        // Le shim ne s'abonne pas aux demandes de confirmation :
-                        // tout ce qui n'est pas un verdict sur cette connexion
-                        // est une anomalie de protocole, pas un message à
-                        // interpréter au mieux.
+                        // The shim does not subscribe to confirmation prompts:
+                        // anything that is not a verdict on this connection is
+                        // a protocol anomaly, not a message to interpret
+                        // charitably.
                         let line = lines.next()?.ok()?;
                         match serde_json::from_str::<ServerMessage>(&line).ok()? {
                             ServerMessage::Verdict(v) => Some(v),
                             other => {
                                 tracing::warn!(
-                                    reçu = ?std::mem::discriminant(&other),
-                                    "message inattendu à la place d'un verdict"
+                                    received = ?std::mem::discriminant(&other),
+                                    "unexpected message in place of a verdict"
                                 );
                                 None
                             }
@@ -175,7 +174,7 @@ impl DaemonClient {
                     let failed = response.is_none();
                     let _ = reply.send(response);
                     if failed {
-                        break; // connexion morte, les appelants basculeront en dégradé
+                        break; // dead connection, callers will fall back to degraded
                     }
                 }
             })
@@ -209,7 +208,7 @@ impl DaemonClient {
 impl DecisionPoint for DaemonClient {
     fn decide(&self, ctx: &CallContext<'_>) -> Result<Verdict, DecisionError> {
         if self.degraded.load(Ordering::Relaxed) {
-            return Err(self.error("daemon injoignable (état dégradé)"));
+            return Err(self.error("daemon unreachable (degraded state)"));
         }
 
         let req = DecideRequest {
@@ -225,18 +224,18 @@ impl DecisionPoint for DaemonClient {
         let (tx, rx) = mpsc::channel();
         if self.tx.send((req, tx)).is_err() {
             self.degraded.store(true, Ordering::Relaxed);
-            return Err(self.error("connexion au daemon fermée"));
+            return Err(self.error("connection to the daemon closed"));
         }
 
         let response = match rx.recv_timeout(self.timeout) {
             Ok(Some(r)) => r,
             Ok(None) => {
                 self.degraded.store(true, Ordering::Relaxed);
-                return Err(self.error("réponse illisible du daemon"));
+                return Err(self.error("unreadable response from the daemon"));
             }
             Err(_) => {
                 self.degraded.store(true, Ordering::Relaxed);
-                return Err(self.error("délai dépassé en attente du verdict"));
+                return Err(self.error("timed out waiting for the verdict"));
             }
         };
 
@@ -251,7 +250,7 @@ impl DecisionPoint for DaemonClient {
 }
 
 impl DaemonClient {
-    /// Délai effectif, dérivé du hello du daemon.
+    /// Effective timeout, derived from the daemon's hello.
     pub fn decide_timeout(&self) -> Duration {
         self.timeout
     }

@@ -1,13 +1,12 @@
 import AppKit
 import SwiftUI
 
-/// Panneau de décision.
+/// The decision panel.
 ///
-/// **Pas un `NSPopover`.** Un popover se ferme à la perte de focus et ne
-/// s'affiche pas au-dessus d'un terminal en plein écran — c'est-à-dire
-/// exactement la situation dans laquelle l'utilisateur se trouve quand son
-/// agent tourne. Le panneau doit apparaître par-dessus ce qu'il fait, sans
-/// voler le focus au clavier.
+/// **Not an `NSPopover`.** A popover closes when it loses focus and does not
+/// show above a full-screen terminal — which is exactly the situation the user
+/// is in while their agent runs. The panel must appear over whatever they are
+/// doing, without stealing keyboard focus.
 final class DecisionPanelController {
     private var panels: [UInt64: NSPanel] = [:]
     private let onDecision: (UInt64, Bool, Until) -> Void
@@ -17,7 +16,7 @@ final class DecisionPanelController {
     }
 
     func present(_ prompt: Prompt) {
-        // Une seule fenêtre par demande, même si le daemon renvoie la demande.
+        // One window per prompt, even if the daemon re-sends the prompt.
         guard panels[prompt.promptID] == nil else { return }
 
         let panel = NSPanel(
@@ -33,13 +32,13 @@ final class DecisionPanelController {
         panel.isMovableByWindowBackground = true
         panel.hidesOnDeactivate = false
 
-        // Au-dessus du terminal, y compris en plein écran, et sur tous les
-        // bureaux : l'utilisateur ne doit pas avoir à chercher la fenêtre.
+        // Above the terminal, full screen included, and on every desktop: the
+        // user must not have to go looking for the window.
         panel.level = .statusBar
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
 
-        // Le panneau ne prend le clavier que si l'utilisateur y va. Voler le
-        // focus pendant qu'on tape dans son terminal serait une agression.
+        // The panel only takes the keyboard if the user goes to it. Stealing
+        // focus while someone is typing in their terminal would be an assault.
         panel.becomesKeyOnlyIfNeeded = true
 
         let view = DecisionView(
@@ -59,10 +58,10 @@ final class DecisionPanelController {
         NSApp.requestUserAttention(.informationalRequest)
     }
 
-    /// Retire un panneau sans décision — demande expirée côté daemon.
+    /// Removes a panel with no decision — the prompt expired daemon-side.
     ///
-    /// Sans ça, l'utilisateur verrait des boutons qui ne feraient plus rien et
-    /// croirait avoir décidé quelque chose.
+    /// Without this, the user would see buttons that no longer do anything and
+    /// would believe they had decided something.
     func dismiss(_ promptID: UInt64) {
         guard let panel = panels.removeValue(forKey: promptID) else { return }
         panel.orderOut(nil)
@@ -73,7 +72,7 @@ final class DecisionPanelController {
         for id in panels.keys { dismiss(id) }
     }
 
-    /// Empile les panneaux depuis le coin haut-droit, sous la barre de menus.
+    /// Stacks the panels from the top-right corner, under the menu bar.
     private func position(_ panel: NSPanel, index: Int) {
         guard let screen = NSScreen.main else { return }
         let visible = screen.visibleFrame
@@ -87,7 +86,7 @@ final class DecisionPanelController {
     }
 }
 
-/// Contenu du panneau.
+/// Panel contents.
 private struct DecisionView: View {
     let prompt: Prompt
     let onDecide: (Bool, Until) -> Void
@@ -131,20 +130,20 @@ private struct DecisionView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            // Le compte à rebours est une information, pas une pression :
-            // l'expiration refuse, elle n'autorise jamais.
+            // The countdown is information, not pressure: expiry refuses, it
+            // never allows.
             Text("\(remaining)s")
                 .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(.secondary)
-                .help("À l'expiration, l'appel est refusé.")
+                .help("On expiry, the call is denied.")
         }
     }
 
     private var details: some View {
         VStack(alignment: .leading, spacing: 6) {
-            row("Serveur", prompt.server ?? "inconnu")
-            row("Projet", projectLabel)
-            if let rule = prompt.rule { row("Règle", rule) }
+            row("Server", prompt.server ?? "unknown")
+            row("Project", projectLabel)
+            if let rule = prompt.rule { row("Rule", rule) }
 
             Text("Arguments")
                 .font(.caption)
@@ -175,23 +174,23 @@ private struct DecisionView: View {
     private var buttons: some View {
         VStack(spacing: 8) {
             HStack(spacing: 8) {
-                Button("Bloquer") { onDecide(false, .once) }
+                Button("Block") { onDecide(false, .once) }
                     .keyboardShortcut(.cancelAction)
-                Button("Autoriser une fois") { onDecide(true, .once) }
-                Button("Autoriser cette session") { onDecide(true, .session) }
+                Button("Allow once") { onDecide(true, .once) }
+                Button("Allow this session") { onDecide(true, .session) }
                     .keyboardShortcut(.defaultAction)
             }
 
             if prompt.foreverAllowed {
-                Button("Toujours autoriser pour ce projet") { onDecide(true, .forever) }
+                Button("Always allow for this project") { onDecide(true, .forever) }
                     .buttonStyle(.link)
                     .font(.caption)
             } else {
-                // On n'offre pas un bouton dont l'effet ne serait pas celui
-                // annoncé : le daemon rétrograderait la décision, parce que la
-                // provenance du projet n'est pas assez sûre pour qu'une
-                // permission permanente ne fuie pas ailleurs.
-                Text("« Toujours » indisponible : le projet n'a pas pu être identifié de façon fiable.")
+                // We do not offer a button whose effect would not be the one
+                // advertised: the daemon would downgrade the decision, because
+                // the project's provenance is not certain enough to keep a
+                // permanent permission from leaking elsewhere.
+                Text("\"Always\" unavailable: the project could not be identified reliably.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -216,7 +215,7 @@ private struct DecisionView: View {
     private var projectLabel: String {
         let name = prompt.scopeKey.hasPrefix("project:")
             ? String(prompt.scopeKey.dropFirst("project:".count))
-            : "inconnu"
+            : "unknown"
         return "\(name)  (\(prompt.scopeSource))"
     }
 

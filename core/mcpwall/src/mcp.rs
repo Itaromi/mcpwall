@@ -1,57 +1,57 @@
-//! Sémantique MCP : identification de la méthode, classement des frames, point
-//! de décision, capture de l'`initialize`.
+//! MCP semantics: identifying the method, classifying frames, the decision
+//! point, capturing `initialize`.
 //!
-//! Deux régimes, volontairement asymétriques :
+//! Two regimes, deliberately asymmetric:
 //!
-//! - Le **scan de méthode** est bon marché et tourne sur chaque frame. Il ne
-//!   construit aucune structure, n'alloue que le nom de la méthode, et suit la
-//!   profondeur des accolades pour n'accepter `method` que comme clé de l'objet
-//!   racine.
-//! - La **capture de l'`initialize`** parse pour de bon avec `serde_json`. Elle
-//!   tourne deux fois par session, jamais dans le chemin critique.
+//! - The **method scan** is cheap and runs on every frame. It builds no
+//!   structure, allocates only the method name, and tracks brace depth so that
+//!   `method` is accepted only as a key of the root object.
+//! - **Capturing `initialize`** parses properly with `serde_json`. It runs
+//!   twice per session, never on the hot path.
 //!
-//! Sans I/O, comme `frame`.
+//! I/O-free, like `frame`.
 
 use std::fmt;
 
-/// Fenêtre de scan bon marché, en octets.
+/// Cheap scan window, in bytes.
 ///
-/// Au-delà, [`scan_method`] repart pour une passe complète plutôt que de
-/// conclure « pas de méthode » par silence. Un `id` de type chaîne un peu long,
-/// ou un sérialiseur qui place `params` avant `method`, suffit à repousser la
-/// clé hors fenêtre — ce n'est pas un cas tordu, c'est du trafic ordinaire.
+/// Beyond it, [`scan_method`] starts a full pass rather than concluding "no
+/// method" from silence. A slightly long string `id`, or a serialiser that puts
+/// `params` before `method`, is enough to push the key out of the window — that
+/// is not a contrived case, it is ordinary traffic.
 pub const METHOD_SCAN_WINDOW: usize = 200;
 
 // ---------------------------------------------------------------------------
-// Scan de méthode
+// Method scan
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MethodScan {
-    /// Méthode extraite d'une clé de l'objet racine.
+    /// Method extracted from a key of the root object.
     Found {
         method: String,
-        /// La fenêtre n'a pas suffi, il a fallu scanner toute la frame. Compté,
-        /// parce qu'un taux élevé signifie qu'il faut élargir [`METHOD_SCAN_WINDOW`].
+        /// The window was not enough, the whole frame had to be scanned.
+        /// Counted, because a high rate means [`METHOD_SCAN_WINDOW`] needs
+        /// widening.
         full_scan: bool,
     },
-    /// Aucune clé `method` à la racine dans toute la frame.
+    /// No root-level `method` key anywhere in the frame.
     ///
-    /// Ce n'est pas une anomalie : une réponse JSON-RPC (`result` ou `error`)
-    /// n'a légitimement pas de méthode.
+    /// This is not an anomaly: a JSON-RPC response (`result` or `error`)
+    /// legitimately has no method.
     NoMethod,
-    /// Une clé `method` existe mais sa valeur n'a pas pu être lue : valeur non
-    /// textuelle, échappement, ou frame tronquée.
+    /// A `method` key exists but its value could not be read: non-textual
+    /// value, escaping, or a truncated frame.
     ///
-    /// Jamais silencieux. Le classement retombe sur [`Disposition::Observe`] —
-    /// on journalise, on ne décide pas sur une base qu'on ne comprend pas.
+    /// Never silent. Classification falls back to [`Disposition::Observe`] — we
+    /// journal it, we do not decide on a basis we do not understand.
     Unparsable,
 }
 
-/// Identifie la méthode d'une frame.
+/// Identifies a frame's method.
 ///
-/// Tente d'abord la fenêtre, puis la frame entière. Les frames dont la taille
-/// tient déjà dans la fenêtre ne sont scannées qu'une fois.
+/// Tries the window first, then the whole frame. Frames that already fit inside
+/// the window are scanned only once.
 pub fn scan_method(frame: &[u8]) -> MethodScan {
     if frame.len() <= METHOD_SCAN_WINDOW {
         return match scan_within(frame, frame.len()) {
@@ -60,8 +60,8 @@ pub fn scan_method(frame: &[u8]) -> MethodScan {
                 full_scan: false,
             },
             Scan::Absent => MethodScan::NoMethod,
-            // Une frame plus courte que la fenêtre qui s'épuise quand même est
-            // tronquée, pas incomplète.
+            // A frame shorter than the window that still runs out is
+            // truncated, not incomplete.
             Scan::Truncated | Scan::Bad => MethodScan::Unparsable,
         };
     }
@@ -72,8 +72,8 @@ pub fn scan_method(frame: &[u8]) -> MethodScan {
             full_scan: false,
         },
         Scan::Bad => MethodScan::Unparsable,
-        // Fenêtre épuisée, ou clé absente de la fenêtre : on ne conclut rien,
-        // on repart sur la frame complète.
+        // Window exhausted, or key absent from the window: we conclude nothing
+        // and start again on the complete frame.
         Scan::Truncated | Scan::Absent => match scan_within(frame, frame.len()) {
             Scan::Found(m) => MethodScan::Found {
                 method: m,
@@ -87,28 +87,28 @@ pub fn scan_method(frame: &[u8]) -> MethodScan {
 
 enum Scan {
     Found(String),
-    /// Aucune clé `method` à la racine dans la portion examinée.
+    /// No root-level `method` key in the portion examined.
     Absent,
-    /// La limite a été atteinte avant de pouvoir conclure.
+    /// The limit was reached before anything could be concluded.
     Truncated,
-    /// Clé trouvée mais valeur illisible.
+    /// Key found but its value is unreadable.
     Bad,
 }
 
-/// Automate à états sur les `limit` premiers octets.
+/// State machine over the first `limit` bytes.
 ///
-/// Suit la profondeur des accolades et l'état « dans une chaîne » pour ne
-/// retenir `method` que s'il s'agit d'une clé de l'objet racine. C'est ce qui
-/// distingue ce scan d'une recherche de sous-chaîne : sur
-/// `{"params":{"method":"x"},"method":"tools/call"}`, une recherche naïve
-/// rendrait `x`.
+/// Tracks brace depth and the "inside a string" state so that `method` is only
+/// taken when it is a key of the root object. That is what distinguishes this
+/// scan from a substring search: on
+/// `{"params":{"method":"x"},"method":"tools/call"}`, a naive search would
+/// return `x`.
 fn scan_within(frame: &[u8], limit: usize) -> Scan {
     let end = limit.min(frame.len());
     let truncated = end < frame.len();
 
     let mut i = 0;
 
-    // Saute jusqu'à l'ouverture de l'objet racine.
+    // Skip ahead to the opening of the root object.
     while i < end && frame[i].is_ascii_whitespace() {
         i += 1;
     }
@@ -120,8 +120,8 @@ fn scan_within(frame: &[u8], limit: usize) -> Scan {
         };
     }
     if frame[i] != b'{' {
-        // Tableau (batch, retiré de la spec depuis 2025-06-18) ou scalaire.
-        // Pas notre affaire ici ; la violation est signalée ailleurs.
+        // Array (batching, removed from the spec as of 2025-06-18) or scalar.
+        // Not our business here; the violation is reported elsewhere.
         return Scan::Absent;
     }
     let mut depth: i32 = 1;
@@ -137,7 +137,7 @@ fn scan_within(frame: &[u8], limit: usize) -> Scan {
                 depth -= 1;
                 i += 1;
                 if depth == 0 {
-                    return Scan::Absent; // objet racine refermé, pas de `method`
+                    return Scan::Absent; // root object closed, no `method`
                 }
             }
             b'"' => {
@@ -149,7 +149,7 @@ fn scan_within(frame: &[u8], limit: usize) -> Scan {
                     };
                 };
 
-                // Une chaîne à la profondeur 1 suivie de `:` est une clé racine.
+                // A string at depth 1 followed by `:` is a root key.
                 let mut j = next;
                 while j < end && frame[j].is_ascii_whitespace() {
                     j += 1;
@@ -169,7 +169,7 @@ fn scan_within(frame: &[u8], limit: usize) -> Scan {
                         };
                     }
                     if frame[j] != b'"' {
-                        return Scan::Bad; // `method` non textuelle
+                        return Scan::Bad; // non-textual `method`
                     }
                     let Some((value, _, value_escaped)) = read_string(frame, j, end) else {
                         return if truncated {
@@ -179,8 +179,8 @@ fn scan_within(frame: &[u8], limit: usize) -> Scan {
                         };
                     };
                     if value_escaped {
-                        // Aucune méthode MCP légitime ne contient d'échappement.
-                        // On refuse de deviner : `Observe`, jamais `Decide`.
+                        // No legitimate MCP method contains an escape. We
+                        // refuse to guess: `Observe`, never `Decide`.
                         return Scan::Bad;
                     }
                     return match std::str::from_utf8(value) {
@@ -202,18 +202,18 @@ fn scan_within(frame: &[u8], limit: usize) -> Scan {
     }
 }
 
-/// Lit la chaîne JSON commençant au guillemet `start`.
+/// Reads the JSON string starting at the quote at `start`.
 ///
-/// Rend le contenu brut, l'index suivant le guillemet fermant, et si la chaîne
-/// contenait un échappement. Rend `None` uniquement si elle n'est pas close
-/// avant `end`.
+/// Returns the raw content, the index after the closing quote, and whether the
+/// string contained an escape. Returns `None` only if it is not closed before
+/// `end`.
 ///
-/// Les échappements sont traversés correctement plutôt qu'abandonnés, et ce
-/// n'est pas un détail de confort : un scan qui renonce sur le premier `\`
-/// classe la frame en `Unparsable` donc en `Observe`, c'est-à-dire hors du
-/// point de décision. Un `tools/call` dont l'`id` contient `\"` suffirait alors
-/// à contourner la politique. Le contenu rendu reste brut — on ne décode rien,
-/// on sait seulement où la chaîne s'arrête.
+/// Escapes are traversed correctly rather than given up on, and that is not a
+/// convenience detail: a scan that bails on the first `\` classifies the frame
+/// as `Unparsable` and therefore `Observe`, that is, outside the decision
+/// point. A `tools/call` whose `id` contains `\"` would then be enough to
+/// bypass the policy. The content returned stays raw — we decode nothing, we
+/// only know where the string ends.
 fn read_string(frame: &[u8], start: usize, end: usize) -> Option<(&[u8], usize, bool)> {
     debug_assert_eq!(frame[start], b'"');
     let mut i = start + 1;
@@ -223,7 +223,7 @@ fn read_string(frame: &[u8], start: usize, end: usize) -> Option<(&[u8], usize, 
             b'"' => return Some((&frame[start + 1..i], i + 1, escaped)),
             b'\\' => {
                 escaped = true;
-                // Le caractère suivant est littéral, y compris `"` et `\`.
+                // The next character is literal, including `"` and `\`.
                 i += 2;
             }
             _ => i += 1,
@@ -233,24 +233,24 @@ fn read_string(frame: &[u8], start: usize, end: usize) -> Option<(&[u8], usize, 
 }
 
 // ---------------------------------------------------------------------------
-// Classement
+// Classification
 // ---------------------------------------------------------------------------
 
-/// Ce que le shim a le droit de faire d'une frame.
+/// What the shim is allowed to do with a frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Disposition {
-    /// Relais immédiat, journalisation sommaire. Zéro parsing supplémentaire.
+    /// Relay immediately, journal briefly. Zero extra parsing.
     Passthrough,
-    /// Journalisation enrichie, mais **jamais** soumise au point de décision.
+    /// Journalled in detail, but **never** submitted to the decision point.
     Observe,
-    /// Passe par le point de décision. Peut être bloquée.
+    /// Goes through the decision point. May be blocked.
     Decide,
 }
 
-/// Méthodes soumises au point de décision.
+/// Methods submitted to the decision point.
 ///
-/// N'ajouter ici que ce dont le blocage est à la fois utile et survivable pour
-/// la session de l'agent.
+/// Only add here what is both useful to block and survivable for the agent's
+/// session.
 const DECIDE: &[&str] = &[
     "tools/call",
     "resources/read",
@@ -258,11 +258,11 @@ const DECIDE: &[&str] = &[
     "elicitation/create",
 ];
 
-/// Méthodes journalisées en détail mais jamais bloquables.
+/// Methods journalled in detail but never blockable.
 ///
-/// `initialize` y figure et doit y rester : le bloquer ne protège de rien et
-/// tue la session entière. La séparation des deux ensembles existe précisément
-/// pour qu'on ne puisse pas le déplacer par inadvertance — voir
+/// `initialize` is here and must stay: blocking it protects nothing and kills
+/// the whole session. The two sets are separate precisely so it cannot be moved
+/// by accident — see
 /// [`initialize_is_never_decidable`](../tests/mcp.rs).
 const OBSERVE: &[&str] = &[
     "initialize",
@@ -272,9 +272,9 @@ const OBSERVE: &[&str] = &[
     "resources/templates/list",
     "prompts/list",
     "prompts/get",
-    // `roots/list` alimente le maillon 2 de la chaîne de provenance de scope, et
-    // sa notification de changement l'invalide. Le shim ne les émet pas, il les
-    // voit passer — d'où `Observe` et pas `Passthrough`.
+    // `roots/list` feeds link 2 of the scope provenance chain, and its
+    // change notification invalidates it. The shim does not emit these, it
+    // sees them go by — hence `Observe` and not `Passthrough`.
     "roots/list",
     "notifications/roots/list_changed",
 ];
@@ -289,62 +289,61 @@ pub fn disposition(method: &str) -> Disposition {
     }
 }
 
-/// Classe une frame à partir de son scan.
+/// Classifies a frame from its scan.
 pub fn classify(scan: &MethodScan) -> Disposition {
     match scan {
         MethodScan::Found { method, .. } => disposition(method),
-        // Une réponse ne porte pas de méthode ; elle est corrélée par `id` en
-        // amont, pas classée ici.
+        // A response carries no method; it is correlated by `id` further up,
+        // not classified here.
         MethodScan::NoMethod => Disposition::Passthrough,
-        // On ne décide jamais sur une frame qu'on n'a pas comprise, et on ne la
-        // laisse pas filer sans trace non plus.
+        // We never decide on a frame we did not understand, and we do not let
+        // it slip by unrecorded either.
         MethodScan::Unparsable => Disposition::Observe,
     }
 }
 
 // ---------------------------------------------------------------------------
-// Point de décision
+// Decision point
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
     Allow,
-    /// Le shim répondra par un `result` valide avec `isError: true`. Jamais une
-    /// erreur de protocole, jamais une fermeture de connexion.
+    /// The shim will answer with a valid `result` carrying `isError: true`.
+    /// Never a protocol error, never a closed connection.
     Deny {
         rule: String,
         message: String,
     },
 }
 
-/// Ce qu'on présente au point de décision.
+/// What we present to the decision point.
 #[derive(Debug, Clone)]
 pub struct CallContext<'a> {
     pub method: &'a str,
-    /// Frame brute. En M1 le daemon la parsera pour évaluer la politique sur le
-    /// contenu des arguments.
+    /// The raw frame. In M1 the daemon parses it to evaluate the policy against
+    /// the contents of the arguments.
     pub frame: &'a [u8],
 }
 
-/// En M0 l'unique implémentation est [`AllowAll`]. En M1 c'est le client du
-/// socket Unix qui l'implémente.
+/// In M0 the only implementation is [`AllowAll`]. In M1 it is the Unix socket
+/// client that implements it.
 ///
-/// **Faillible exprès.** Un client de socket doit pouvoir dire « je n'ai pas pu
-/// joindre le daemon » sans avoir à mentir `Allow` ni à paniquer. L'appelant
-/// traite tout `Err` comme un `Allow` journalisé : c'est la règle de
-/// disponibilité §4 appliquée au code de mcpwall lui-même. Sans ce `Result`, le
-/// seul recours en M1 serait un `unwrap` déguisé dans le chemin du shim.
+/// **Fallible on purpose.** A socket client must be able to say "I could not
+/// reach the daemon" without having to lie `Allow` or panic. The caller treats
+/// any `Err` as a journalled `Allow`: that is the availability rule of §4
+/// applied to mcpwall's own code. Without this `Result`, the only recourse in
+/// M1 would be an `unwrap` in disguise on the shim's path.
 pub trait DecisionPoint: Send + Sync {
     fn decide(&self, ctx: &CallContext<'_>) -> Result<Verdict, DecisionError>;
 }
 
-/// Le point de décision n'a pas pu se prononcer. Jamais fatal.
+/// The decision point could not rule. Never fatal.
 #[derive(Debug, Clone)]
 pub struct DecisionError {
     pub reason: String,
-    /// La politique demande-t-elle de fermer en cas de panne ? Renseigné par le
-    /// client du daemon à partir de `fail_closed`, faute de quoi l'appelant
-    /// laisse passer.
+    /// Does the policy ask to close on failure? Filled in by the daemon client
+    /// from `fail_closed`, failing which the caller lets traffic through.
     pub fail_closed: bool,
 }
 
@@ -363,7 +362,7 @@ impl fmt::Display for DecisionError {
     }
 }
 
-/// M0 : observation seule.
+/// M0: observation only.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AllowAll;
 
@@ -373,18 +372,18 @@ impl DecisionPoint for AllowAll {
     }
 }
 
-/// Fabrique la réponse à renvoyer au client quand un appel est bloqué.
+/// Builds the response to send back to the client when a call is blocked.
 ///
-/// Forme imposée par la §5 de la spec projet : jamais une erreur JSON-RPC de
-/// protocole, jamais une fermeture de connexion. Un `result` valide portant
-/// `isError: true`, que l'agent lit comme un échec d'outil ordinaire, auquel il
-/// s'adapte, et après lequel il continue.
+/// The shape is mandated by §5 of the project spec: never a JSON-RPC protocol
+/// error, never a closed connection. A valid `result` carrying `isError: true`,
+/// which the agent reads as an ordinary tool failure, adapts to, and carries on
+/// after.
 ///
-/// Rend `None` si la frame bloquée n'a pas d'`id` : c'est une notification, elle
-/// n'attend aucune réponse et il n'y a rien à renvoyer. La frame est simplement
-/// jetée.
+/// Returns `None` if the blocked frame has no `id`: it is a notification, it
+/// expects no response and there is nothing to send back. The frame is simply
+/// dropped.
 ///
-/// La sortie est terminée par `\n` : c'est une frame prête à écrire.
+/// The output is terminated by `\n`: it is a frame ready to write.
 pub fn deny_response(frame: &[u8], rule: &str, message: &str) -> Option<Vec<u8>> {
     let v: serde_json::Value = serde_json::from_slice(frame).ok()?;
     let id = v.get("id")?;
@@ -410,33 +409,34 @@ pub fn deny_response(frame: &[u8], rule: &str, message: &str) -> Option<Vec<u8>>
 }
 
 // ---------------------------------------------------------------------------
-// Capture de l'`initialize`
+// Capturing `initialize`
 // ---------------------------------------------------------------------------
 
-/// Ce qu'on retient de la requête `initialize` du client.
+/// What we keep from the client's `initialize` request.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ClientHello {
-    /// Version **demandée**. La version retenue est celle de [`ServerHello`].
+    /// The version **requested**. The version settled on is the one in
+    /// [`ServerHello`].
     pub requested_protocol_version: Option<String>,
     pub client_name: Option<String>,
     pub client_version: Option<String>,
-    /// Le client annonce-t-il la capacité `roots` ? Détermine si le maillon 2 de
-    /// la chaîne de provenance de scope a une chance d'être alimenté.
+    /// Does the client announce the `roots` capability? Determines whether link
+    /// 2 of the scope provenance chain has any chance of being fed.
     pub supports_roots: bool,
     pub roots_list_changed: bool,
 }
 
-/// Ce qu'on retient de la réponse `initialize` du serveur.
+/// What we keep from the server's `initialize` response.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ServerHello {
-    /// Version **négociée**. C'est ce champ qu'on stocke : la spec veut que le
-    /// serveur réponde avec la version retenue, qui peut différer de celle que
-    /// le client a demandée.
+    /// The **negotiated** version. This is the field we store: the spec wants
+    /// the server to answer with the version settled on, which may differ from
+    /// the one the client asked for.
     pub protocol_version: Option<String>,
     pub server_name: Option<String>,
     pub server_version: Option<String>,
-    /// Clés de premier niveau de `capabilities`, triées. Suffit au journal sans
-    /// stocker l'objet entier.
+    /// Top-level keys of `capabilities`, sorted. Enough for the journal without
+    /// storing the whole object.
     pub capabilities: Vec<String>,
 }
 

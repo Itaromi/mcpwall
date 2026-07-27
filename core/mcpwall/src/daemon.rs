@@ -1,9 +1,9 @@
-//! Le daemon : un seul par machine, lancé et supervisé par l'app en M2.
+//! The daemon: one per machine, started and supervised by the app as of M2.
 //!
-//! Il fait quatre choses — évaluer la politique, demander confirmation quand
-//! elle le réclame, tenir les décisions déjà prises, et répondre. Tout le reste
-//! (relais, journal de trafic) appartient au shim, ce qui garde le daemon assez
-//! petit pour qu'une panne y soit rare et surtout survivable.
+//! It does four things — evaluate the policy, ask for confirmation when the
+//! policy calls for it, hold the decisions already made, and answer. Everything
+//! else (relaying, traffic journal) belongs to the shim, which keeps the daemon
+//! small enough that a failure in it is rare and, above all, survivable.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -22,13 +22,13 @@ use crate::ipc::{
 use crate::policy::{Action, Decision, Policy, request_from_frame};
 use crate::scope::{Scope, ScopeSource};
 
-/// Capacité du canal de diffusion vers les UI.
+/// Capacity of the broadcast channel towards the UIs.
 ///
-/// Une seule UI en pratique. La marge absorbe une rafale de demandes pendant
-/// qu'un panneau est déjà ouvert.
+/// A single UI in practice. The headroom absorbs a burst of prompts while a
+/// panel is already open.
 const PROMPT_CHANNEL: usize = 64;
 
-/// Décision enregistrée par l'utilisateur.
+/// A decision recorded by the user.
 #[derive(Debug, Clone)]
 struct Override {
     scope_key: String,
@@ -44,11 +44,11 @@ impl Override {
 
 #[derive(Default)]
 struct State {
-    /// Décisions de portée `session`, oubliées à l'arrêt du daemon.
+    /// `session`-scoped decisions, forgotten when the daemon stops.
     session_overrides: Vec<Override>,
-    /// Demandes en attente de réponse d'une UI.
+    /// Prompts awaiting an answer from a UI.
     pending: HashMap<u64, oneshot::Sender<Answer>>,
-    /// Nombre d'UI abonnées.
+    /// Number of subscribed UIs.
     subscribers: usize,
 }
 
@@ -74,32 +74,32 @@ impl Daemon {
         })
     }
 
-    /// Écoute sur le socket jusqu'à interruption.
+    /// Listens on the socket until interrupted.
     pub async fn serve(self: Arc<Self>, socket: &Path) -> Result<()> {
         if let Some(parent) = socket.parent() {
             std::fs::create_dir_all(parent).ok();
         }
 
-        // `sockaddr_un.sun_path` fait 104 octets sur macOS, 108 sur Linux. Le
-        // dépassement remonte sinon en « path must be shorter than SUN_LEN »,
-        // qui n'aide personne.
+        // `sockaddr_un.sun_path` is 104 bytes on macOS, 108 on Linux. Going
+        // over otherwise surfaces as "path must be shorter than SUN_LEN",
+        // which helps nobody.
         const SUN_PATH_MAX: usize = 100;
         if socket.as_os_str().len() > SUN_PATH_MAX {
             anyhow::bail!(
-                "chemin de socket trop long ({} octets, maximum {SUN_PATH_MAX}) : {}\n\
-                 Choisissez un chemin plus court avec --socket.",
+                "socket path too long ({} bytes, maximum {SUN_PATH_MAX}): {}\n\
+                 Choose a shorter path with --socket.",
                 socket.as_os_str().len(),
                 socket.display()
             );
         }
 
-        // Un socket résiduel d'un daemon mort empêcherait le bind. On ne le
-        // supprime qu'après avoir vérifié que personne ne répond dessus, sinon
-        // on volerait le socket d'un daemon vivant.
+        // A leftover socket from a dead daemon would prevent the bind. We only
+        // remove it after checking that nobody answers on it, otherwise we
+        // would steal a live daemon's socket.
         if socket.exists() {
             match UnixStream::connect(socket).await {
                 Ok(_) => anyhow::bail!(
-                    "un daemon écoute déjà sur {} — un seul par machine",
+                    "a daemon is already listening on {} — one per machine",
                     socket.display()
                 ),
                 Err(_) => {
@@ -109,26 +109,26 @@ impl Daemon {
         }
 
         let listener = UnixListener::bind(socket)
-            .with_context(|| format!("écoute sur {}", socket.display()))?;
+            .with_context(|| format!("listening on {}", socket.display()))?;
 
-        // Le socket ne doit être accessible qu'à son propriétaire : y écrire,
-        // c'est décider des verdicts de sécurité de quelqu'un.
+        // The socket must be reachable only by its owner: writing to it means
+        // deciding someone's security verdicts.
         restrict_permissions(socket);
 
-        tracing::info!(socket = %socket.display(), "daemon en écoute");
+        tracing::info!(socket = %socket.display(), "daemon listening");
 
         loop {
             let (stream, _) = match listener.accept().await {
                 Ok(v) => v,
                 Err(e) => {
-                    tracing::warn!(erreur = %e, "connexion refusée");
+                    tracing::warn!(error = %e, "connection refused");
                     continue;
                 }
             };
             let me = self.clone();
             tokio::spawn(async move {
                 if let Err(e) = me.handle(stream).await {
-                    tracing::debug!(erreur = %e, "connexion terminée");
+                    tracing::debug!(error = %e, "connection ended");
                 }
             });
         }
@@ -139,14 +139,14 @@ impl Daemon {
         let mut lines = BufReader::new(read).lines();
         let write = Arc::new(Mutex::new(write));
 
-        // Handshake d'abord, tout le reste ensuite.
+        // Handshake first, everything else after.
         let Some(first) = lines.next_line().await? else {
             return Ok(());
         };
-        let peer: Hello = serde_json::from_str(&first).context("hello illisible")?;
+        let peer: Hello = serde_json::from_str(&first).context("unreadable hello")?;
 
-        // On annonce combien de temps un verdict peut prendre, pour que le pair
-        // ne renonce pas pendant qu'on attend l'utilisateur.
+        // We announce how long a verdict may take, so the peer does not give
+        // up while we are waiting on the user.
         let mine = Hello {
             ask_timeout_seconds: Some(self.policy.lock().await.ask_timeout().as_secs()),
             ..Hello::default()
@@ -155,10 +155,10 @@ impl Daemon {
 
         if !peer.compatible() {
             tracing::warn!(
-                pair = peer.mcpwall_ipc,
+                peer = peer.mcpwall_ipc,
                 daemon = mine.mcpwall_ipc,
-                build_pair = %peer.build,
-                "version IPC incompatible, la connexion passera en fail-open"
+                peer_build = %peer.build,
+                "incompatible IPC version, this connection will go fail-open"
             );
             return Ok(());
         }
@@ -172,7 +172,7 @@ impl Daemon {
             let msg: ClientMessage = match serde_json::from_str(&line) {
                 Ok(m) => m,
                 Err(e) => {
-                    tracing::warn!(erreur = %e, "message illisible");
+                    tracing::warn!(error = %e, "unreadable message");
                     continue;
                 }
             };
@@ -189,11 +189,11 @@ impl Daemon {
                     }
                     subscribed = true;
                     self.state.lock().await.subscribers += 1;
-                    tracing::info!("interface connectée");
+                    tracing::info!("interface connected");
 
-                    // Les demandes partent en tâche dédiée : le daemon ne doit
-                    // jamais attendre qu'une UI lise pour continuer à servir
-                    // les shims.
+                    // Prompts go out on a dedicated task: the daemon must
+                    // never wait for a UI to read before it can carry on
+                    // serving the shims.
                     let mut rx = self.prompts.subscribe();
                     let w = write.clone();
                     tokio::spawn(async move {
@@ -210,11 +210,12 @@ impl Daemon {
                     if let Some(tx) = st.pending.remove(&answer.prompt_id) {
                         let _ = tx.send(answer);
                     } else {
-                        // Réponse à une demande expirée. Sans trace, l'utilisateur
-                        // croirait avoir décidé quelque chose qui n'a pas eu lieu.
+                        // An answer to an expired prompt. With no record, the
+                        // user would believe they decided something that never
+                        // happened.
                         tracing::info!(
                             prompt_id = answer.prompt_id,
-                            "réponse à une demande déjà expirée, ignorée"
+                            "answer to an already-expired prompt, ignored"
                         );
                     }
                 }
@@ -229,7 +230,7 @@ impl Daemon {
         if subscribed {
             let mut st = self.state.lock().await;
             st.subscribers = st.subscribers.saturating_sub(1);
-            tracing::info!("interface déconnectée");
+            tracing::info!("interface disconnected");
         }
         Ok(())
     }
@@ -254,7 +255,7 @@ impl Daemon {
 
         let forever_allowed = scope.allows_forever();
 
-        // Une décision déjà prise par l'utilisateur ne lui est pas redemandée.
+        // A decision the user has already made is not asked again.
         if let Some(ov) = self
             .matching_override(&req.scope_key, tool.as_deref())
             .await
@@ -262,7 +263,7 @@ impl Daemon {
             return DecideResponse {
                 outcome: if ov { Outcome::Allow } else { Outcome::Deny },
                 rule: Some("override".to_owned()),
-                message: "décision enregistrée pour ce projet".to_owned(),
+                message: "decision recorded for this project".to_owned(),
                 forever_allowed,
             };
         }
@@ -276,10 +277,10 @@ impl Daemon {
             },
             Action::Deny => {
                 tracing::info!(
-                    méthode = %req.method,
-                    outil = tool.as_deref().unwrap_or("-"),
-                    règle = decision.rule.as_deref().unwrap_or("-"),
-                    "appel bloqué"
+                    method = %req.method,
+                    tool = tool.as_deref().unwrap_or("-"),
+                    rule = decision.rule.as_deref().unwrap_or("-"),
+                    "call blocked"
                 );
                 DecideResponse {
                     outcome: Outcome::Deny,
@@ -295,7 +296,7 @@ impl Daemon {
         }
     }
 
-    /// Demande confirmation à l'utilisateur.
+    /// Asks the user for confirmation.
     async fn ask(
         self: Arc<Self>,
         req: &DecideRequest,
@@ -311,12 +312,12 @@ impl Daemon {
             forever_allowed,
         };
 
-        // Sans interface, personne ne peut répondre. On refuse plutôt que
-        // d'autoriser en silence — mais on le dit à l'agent, pour qu'il ne
-        // conclue pas à une panne de l'outil.
+        // With no interface, nobody can answer. We refuse rather than allow
+        // silently — but we say so to the agent, so it does not conclude the
+        // tool is broken.
         if self.state.lock().await.subscribers == 0 {
             return deny(format!(
-                "{} (aucune interface pour confirmer — lancez l'application mcpwall)",
+                "{} (no interface to confirm with — start the mcpwall application)",
                 decision.agent_message()
             ));
         }
@@ -348,7 +349,7 @@ impl Daemon {
         {
             self.state.lock().await.pending.remove(&prompt_id);
             return deny(format!(
-                "{} (interface injoignable)",
+                "{} (interface unreachable)",
                 decision.agent_message()
             ));
         }
@@ -356,28 +357,28 @@ impl Daemon {
         let answer = match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(a)) => a,
             _ => {
-                // Expiration ou UI disparue. On retire la demande et on prévient
-                // l'interface pour qu'elle ferme le panneau plutôt que de laisser
-                // un bouton qui ne fera plus rien.
+                // Expiry, or the UI vanished. We withdraw the prompt and tell
+                // the interface, so it closes the panel rather than leaving a
+                // button that will no longer do anything.
                 self.state.lock().await.pending.remove(&prompt_id);
                 let _ = self.prompts.send(ServerMessage::Withdraw { prompt_id });
                 return deny(format!(
-                    "{} (délai de confirmation dépassé)",
+                    "{} (confirmation timed out)",
                     decision.agent_message()
                 ));
             }
         };
 
-        // `forever` est refusé si la provenance du scope ne le permet pas, même
-        // si l'UI le demande. L'interface est un client, pas une autorité : une
-        // permission permanente accordée sur un scope incertain fuirait vers
-        // d'autres projets.
+        // `forever` is refused when the scope's provenance does not warrant
+        // it, even if the UI asks for it. The interface is a client, not an
+        // authority: a permanent permission granted on an uncertain scope would
+        // leak into other projects.
         let until = match answer.until {
             Until::Forever if !forever_allowed => {
                 tracing::warn!(
                     scope = %req.scope_key,
                     provenance = %req.scope_source,
-                    "portée `forever` demandée sur un scope non fiable, rétrogradée en `session`"
+                    "`forever` scope requested on an untrusted scope, downgraded to `session`"
                 );
                 Until::Session
             }
@@ -393,14 +394,11 @@ impl Daemon {
             DecideResponse {
                 outcome: Outcome::Allow,
                 rule: decision.rule.clone(),
-                message: "autorisé par l'utilisateur".to_owned(),
+                message: "allowed by the user".to_owned(),
                 forever_allowed,
             }
         } else {
-            deny(format!(
-                "{} (refusé par l'utilisateur)",
-                decision.agent_message()
-            ))
+            deny(format!("{} (denied by the user)", decision.agent_message()))
         }
     }
 
@@ -414,7 +412,7 @@ impl Daemon {
 
     async fn record_override(&self, scope_key: &str, tool: &str, allow: bool, until: Until) {
         match until {
-            // Rien à retenir : la décision ne valait que pour cet appel.
+            // Nothing to remember: the decision applied to this call only.
             Until::Once => {}
             Until::Session => {
                 self.state.lock().await.session_overrides.push(Override {
@@ -424,8 +422,8 @@ impl Daemon {
                 });
             }
             Until::Forever => {
-                // En mémoire d'abord, pour que la décision s'applique même si
-                // l'écriture du fichier échoue.
+                // In memory first, so the decision applies even if writing the
+                // file fails.
                 self.state.lock().await.session_overrides.push(Override {
                     scope_key: scope_key.to_owned(),
                     tool: tool.to_owned(),
@@ -434,7 +432,7 @@ impl Daemon {
                 if let Some(path) = &self.policy_path
                     && let Err(e) = crate::policy::append_override(path, scope_key, tool, allow)
                 {
-                    tracing::error!(erreur = %e, "override permanent non persisté");
+                    tracing::error!(error = %e, "permanent override not persisted");
                 }
             }
         }
@@ -470,11 +468,11 @@ fn parse_source(s: &str) -> ScopeSource {
     }
 }
 
-/// Extrait lisible des arguments, tronqué.
+/// Readable excerpt of the arguments, truncated.
 ///
-/// Le panneau doit montrer assez pour décider, pas le message entier — et
-/// jamais la valeur d'un secret, que le moteur remplace déjà par son type et un
-/// préfixe dans `findings`.
+/// The panel must show enough to decide on, not the whole message — and never
+/// the value of a secret, which the engine already replaces with its kind and a
+/// prefix in `findings`.
 fn preview(frame: &str) -> String {
     const MAX: usize = 400;
     let Ok(v) = serde_json::from_str::<serde_json::Value>(frame) else {
@@ -514,20 +512,20 @@ fn restrict_permissions(socket: &Path) {
 #[cfg(not(unix))]
 fn restrict_permissions(_socket: &Path) {}
 
-/// Point d'entrée de `mcpwall daemon`.
+/// Entry point of `mcpwall daemon`.
 pub async fn run(socket: PathBuf, policy_path: PathBuf, journal_db: PathBuf) -> Result<()> {
     let policy = Policy::load_or_create(&policy_path)?;
-    tracing::info!(politique = %policy_path.display(), "politique chargée");
+    tracing::info!(policy = %policy_path.display(), "policy loaded");
 
     let daemon = Daemon::new(policy, Some(policy_path), journal_db);
     let socket_for_cleanup = socket.clone();
 
-    // Le socket doit disparaître à l'arrêt, sinon le prochain démarrage croit
-    // qu'un daemon tourne déjà.
+    // The socket must disappear on shutdown, otherwise the next start believes
+    // a daemon is already running.
     let result = tokio::select! {
         r = daemon.serve(&socket) => r,
         _ = shutdown_signal() => {
-            tracing::info!("arrêt demandé");
+            tracing::info!("shutdown requested");
             Ok(())
         }
     };

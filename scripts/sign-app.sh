@@ -1,22 +1,21 @@
 #!/usr/bin/env bash
 #
-# Signe, notarise et empaquette mcpwall.app en .dmg.
+# Signs, notarises and packages mcpwall.app into a .dmg.
 #
-# ⚠️ CE SCRIPT N'A PAS PU ÊTRE EXÉCUTÉ NI VÉRIFIÉ.
-# Il a été écrit sans compte développeur Apple disponible : aucune identité de
-# signature sur la machine de développement. Les commandes suivent la
-# documentation d'Apple mais doivent être considérées comme non testées tant
-# que quelqu'un ne les aura pas fait tourner de bout en bout.
+# ⚠️ THIS SCRIPT HAS NEVER BEEN RUN OR VERIFIED.
+# It was written with no Apple developer account available: no signing identity
+# on the development machine. The commands follow Apple's documentation but must
+# be treated as untested until somebody has run them end to end.
 #
-# Prérequis :
-#   - un « Developer ID Application » dans le trousseau
-#     (vérifier avec `security find-identity -v -p codesigning`)
-#   - un profil notarytool enregistré :
+# Requirements:
+#   - a "Developer ID Application" in the keychain
+#     (check with `security find-identity -v -p codesigning`)
+#   - a registered notarytool profile:
 #       xcrun notarytool store-credentials mcpwall \
-#         --apple-id VOTRE@ID --team-id VOTRETEAM --password MOT-DE-PASSE-APP
+#         --apple-id YOUR@ID --team-id YOURTEAM --password APP-SPECIFIC-PASSWORD
 #
-# Usage :
-#   MCPWALL_IDENTITY="Developer ID Application: Nom (TEAMID)" ./scripts/sign-app.sh
+# Usage:
+#   MCPWALL_IDENTITY="Developer ID Application: Name (TEAMID)" ./scripts/sign-app.sh
 
 set -euo pipefail
 
@@ -27,21 +26,21 @@ DMG="$BUILD/mcpwall.dmg"
 NOTARY_PROFILE="${MCPWALL_NOTARY_PROFILE:-mcpwall}"
 
 if [[ ! -d "$APP" ]]; then
-    echo "erreur : $APP absent. Lancez d'abord scripts/build-app.sh." >&2
+    echo "error: $APP is missing. Run scripts/build-app.sh first." >&2
     exit 1
 fi
 
 if [[ -z "${MCPWALL_IDENTITY:-}" ]]; then
-    echo "erreur : MCPWALL_IDENTITY non défini." >&2
-    echo "Identités disponibles :" >&2
+    echo "error: MCPWALL_IDENTITY is not set." >&2
+    echo "Available identities:" >&2
     security find-identity -v -p codesigning >&2
     exit 1
 fi
 
 # --- Entitlements ----------------------------------------------------------
-# Le durcissement du runtime est exigé pour la notarisation. mcpwall lance un
-# processus enfant (le daemon) et lit des fichiers de configuration dans le
-# home : ces deux exceptions sont donc nécessaires. On n'en demande pas d'autre.
+# The hardened runtime is required for notarisation. mcpwall starts a child
+# process (the daemon) and reads configuration files in the home directory:
+# those two exceptions are therefore necessary. We ask for no others.
 ENTITLEMENTS="$BUILD/mcpwall.entitlements"
 cat > "$ENTITLEMENTS" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -55,17 +54,16 @@ cat > "$ENTITLEMENTS" <<'PLIST'
 </plist>
 PLIST
 
-# --- Signature -------------------------------------------------------------
-# De l'intérieur vers l'extérieur : le binaire embarqué d'abord, le bundle
-# ensuite. Signer le bundle en premier invaliderait sa signature dès qu'on
-# toucherait à son contenu.
-echo "==> signature du core embarqué"
+# --- Signing ---------------------------------------------------------------
+# Inside out: the embedded binary first, the bundle second. Signing the bundle
+# first would invalidate its signature the moment we touched its contents.
+echo "==> signing the embedded core"
 codesign --force --timestamp --options runtime \
     --entitlements "$ENTITLEMENTS" \
     --sign "$MCPWALL_IDENTITY" \
     "$APP/Contents/Resources/mcpwall"
 
-echo "==> signature du bundle"
+echo "==> signing the bundle"
 codesign --force --timestamp --options runtime \
     --entitlements "$ENTITLEMENTS" \
     --sign "$MCPWALL_IDENTITY" \
@@ -79,27 +77,27 @@ STAGING="$BUILD/dmg"
 rm -rf "$STAGING" "$DMG"
 mkdir -p "$STAGING"
 cp -R "$APP" "$STAGING/"
-# Le raccourci vers /Applications : l'utilisateur glisse-dépose, il ne cherche
-# pas où installer.
+# The shortcut to /Applications: the user drags and drops, they do not go
+# looking for where to install.
 ln -s /Applications "$STAGING/Applications"
 
 hdiutil create -volname "mcpwall" -srcfolder "$STAGING" -ov -format UDZO "$DMG"
 codesign --force --timestamp --sign "$MCPWALL_IDENTITY" "$DMG"
 
 # --- Notarisation ----------------------------------------------------------
-# Sans elle, Gatekeeper refuse l'ouverture et l'utilisateur doit passer par un
-# clic droit → Ouvrir. C'est exactement le genre de friction qui fait échouer
-# l'onboarding.
-echo "==> notarisation (peut prendre plusieurs minutes)"
+# Without it, Gatekeeper refuses to open the app and the user has to go through
+# right click → Open. That is exactly the kind of friction that makes onboarding
+# fail.
+echo "==> notarisation (may take several minutes)"
 xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait
 
-echo "==> agrafage"
+echo "==> stapling"
 xcrun stapler staple "$DMG"
 xcrun stapler validate "$DMG"
 
-# Contrôle final : ce que verra la machine de l'utilisateur.
-echo "==> vérification Gatekeeper"
+# Final check: what the user's machine will see.
+echo "==> Gatekeeper check"
 spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG"
 
 echo
-echo "prêt : $DMG"
+echo "ready: $DMG"

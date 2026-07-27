@@ -1,9 +1,8 @@
 #![forbid(unsafe_code)]
 
-//! Binaire unique. Le shim, le daemon et les commandes d'administration sont
-//! des sous-commandes d'un même exécutable — un seul artefact à embarquer dans
-//! l'app, un seul lien symbolique, et aucune dérive de version possible entre
-//! shim et daemon.
+//! A single binary. The shim, the daemon and the administrative commands are
+//! subcommands of one executable — a single artefact to embed in the app, a
+//! single symlink, and no possible version drift between shim and daemon.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -22,11 +21,11 @@ use mcpwall::{daemon, ipc, policy, setup};
 #[derive(Parser)]
 #[command(
     name = "mcpwall",
-    about = "Pare-feu applicatif local pour agents de code",
+    about = "Local application firewall for coding agents",
     version
 )]
 struct Cli {
-    /// Base de journal. Par défaut `~/.mcpwall/journal.db`.
+    /// Journal database. Defaults to `~/.mcpwall/journal.db`.
     #[arg(long, global = true)]
     db: Option<PathBuf>,
 
@@ -36,79 +35,79 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Enveloppe un serveur MCP stdio et journalise son trafic.
+    /// Wrap a stdio MCP server and journal its traffic.
     Wrap(WrapArgs),
-    /// Consulte le journal.
+    /// Inspect the journal.
     Log(LogArgs),
-    /// Lance le daemon de politique. Un seul par machine.
+    /// Run the policy daemon. One per machine.
     ///
-    /// En M2 c'est l'app macOS qui le lance et le supervise comme processus
-    /// enfant : elle ne le réimplémente pas.
+    /// In M2 it is the macOS app that starts and supervises it as a child
+    /// process: the app does not reimplement it.
     Daemon(DaemonArgs),
-    /// Installe mcpwall dans les configurations MCP existantes.
+    /// Install mcpwall into the existing MCP configurations.
     Init(InitArgs),
-    /// Remet les configurations en état depuis les sauvegardes.
+    /// Put the configurations back from the backups.
     Restore,
-    /// Affiche la politique effective et vérifie sa syntaxe.
+    /// Print the effective policy and check its syntax.
     Policy,
 }
 
 #[derive(Args)]
 struct DaemonArgs {
-    /// Socket d'écoute.
+    /// Socket to listen on.
     #[arg(long)]
     socket: Option<PathBuf>,
-    /// Fichier de politique. Créé avec les règles par défaut s'il manque.
+    /// Policy file. Created with the default rules if missing.
     #[arg(long)]
     policy: Option<PathBuf>,
 }
 
 #[derive(Args)]
 struct InitArgs {
-    /// Écrit réellement. Sans ce drapeau, `init` se contente d'afficher le diff.
+    /// Actually write. Without this flag, `init` only prints the diff.
     #[arg(long)]
     apply: bool,
 
-    /// Projets supplémentaires où chercher un `.mcp.json`.
-    #[arg(long = "project", value_name = "CHEMIN")]
+    /// Extra projects to search for a `.mcp.json`.
+    #[arg(long = "project", value_name = "PATH")]
     projects: Vec<PathBuf>,
 }
 
 #[derive(Args)]
 struct WrapArgs {
-    /// Projet auquel rattacher la session.
+    /// Project this session belongs to.
     ///
-    /// Écrit par `mcpwall init` dans la configuration du client. C'est le
-    /// maillon le plus fiable de la chaîne de provenance : déterministe et
-    /// identique sur tous les clients, là où le cwd hérité change de sens selon
-    /// qui lance le shim.
+    /// Written by `mcpwall init` into the client configuration. It is the most
+    /// trustworthy link of the provenance chain: deterministic and identical
+    /// across clients, where the inherited cwd changes meaning depending on who
+    /// starts the shim.
     #[arg(long)]
     project: Option<PathBuf>,
 
-    /// Socket du daemon. Par défaut `~/.mcpwall/daemon.sock`.
+    /// Daemon socket. Defaults to `~/.mcpwall/daemon.sock`.
     #[arg(long)]
     socket: Option<PathBuf>,
 
-    /// Commande du serveur amont, après `--`.
+    /// Upstream server command, after `--`.
     #[arg(last = true, required = true)]
     command: Vec<OsString>,
 }
 
 #[derive(Args)]
 struct LogArgs {
-    /// Nombre de lignes.
+    /// Number of lines.
     #[arg(short = 'n', long, default_value_t = 20)]
     tail: i64,
 
-    /// Suit le journal en continu.
+    /// Follow the journal continuously.
     #[arg(short, long)]
     follow: bool,
 
-    /// Compteurs plutôt que lignes.
+    /// Counters instead of lines.
     #[arg(long)]
     stats: bool,
 
-    /// Une ligne JSON par entrée.
+    /// One JSON line per entry.
     #[arg(long)]
     json: bool,
 }
@@ -118,9 +117,9 @@ fn main() -> Result<()> {
     let db = cli.db.clone().unwrap_or_else(journal::default_db_path);
 
     match cli.command {
-        // Le shim écrit ses diagnostics sur stderr, jamais sur stdout : stdout
-        // appartient au protocole, et y écrire un octet parasite casserait la
-        // session.
+        // The shim writes its diagnostics to stderr, never to stdout: stdout
+        // belongs to the protocol, and writing one stray byte there would
+        // break the session.
         Command::Wrap(args) => {
             init_tracing();
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -163,7 +162,7 @@ fn init_tracing_at(default: &str) {
 async fn cmd_wrap(db: PathBuf, args: WrapArgs) -> Result<i32> {
     let mut command = args.command.into_iter();
     let Some(program) = command.next() else {
-        bail!("commande amont manquante après `--`");
+        bail!("missing upstream command after `--`");
     };
     let rest: Vec<OsString> = command.collect();
 
@@ -173,21 +172,21 @@ async fn cmd_wrap(db: PathBuf, args: WrapArgs) -> Result<i32> {
         .collect::<Vec<_>>()
         .join(" ");
 
-    // Une panne de journal ne doit pas empêcher le serveur MCP de démarrer :
-    // on dégrade en relais nu plutôt que de casser la session.
+    // A journal failure must not stop the MCP server from starting: we
+    // degrade to a bare relay rather than break the session.
     let (journal, writer) = match Journal::open(&db) {
         Ok(pair) => pair,
         Err(e) => {
-            tracing::error!(erreur = %e, "journal indisponible, relais sans journalisation");
+            tracing::error!(error = %e, "journal unavailable, relaying without journalling");
             Journal::open_in_memory()?
         }
     };
 
     let observer = JournalObserver::new(journal.clone(), display, args.project.clone()).await;
 
-    // Le point de décision est le daemon s'il répond, sinon rien. L'absence de
-    // daemon dégrade en observation seule : c'est la règle de disponibilité §4,
-    // et c'est ce qui permet de fermer l'app sans paralyser les serveurs MCP.
+    // The decision point is the daemon if it answers, otherwise nothing. No
+    // daemon degrades to observation only: that is the availability rule of §4,
+    // and it is what lets the app be closed without paralysing the MCP servers.
     let socket = args.socket.clone().unwrap_or_else(ipc::socket_path);
     let decision: Arc<dyn DecisionPoint> = match DaemonClient::connect(
         &socket,
@@ -216,22 +215,22 @@ async fn cmd_wrap(db: PathBuf, args: WrapArgs) -> Result<i32> {
     )
     .await?;
 
-    // La session est finie : on garantit que tout est écrit avant de rendre la
-    // main, sinon les dernières entrées seraient perdues à la sortie.
+    // The session is over: we guarantee everything is written before handing
+    // back control, otherwise the last entries would be lost on exit.
     journal.flush().await;
     let dropped = journal.dropped();
     drop(journal);
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), writer).await;
 
     if dropped > 0 {
-        tracing::warn!(perdues = dropped, "entrées de journal perdues");
+        tracing::warn!(dropped, "journal entries lost");
     }
     Ok(code)
 }
 
 fn cmd_log(db: PathBuf, args: LogArgs) -> Result<()> {
     if !db.exists() {
-        println!("aucun journal en {} — rien à afficher", db.display());
+        println!("no journal at {} — nothing to show", db.display());
         return Ok(());
     }
     let conn = journal::open_readonly(&db)?;
@@ -239,17 +238,17 @@ fn cmd_log(db: PathBuf, args: LogArgs) -> Result<()> {
     if args.stats {
         let s = journal::stats(&conn)?;
         println!("sessions        {}", s.sessions);
-        println!("appels          {}", s.entries);
-        println!("bloqués         {}", s.denied);
-        println!("en attente      {}", s.asked);
+        println!("calls           {}", s.entries);
+        println!("blocked         {}", s.denied);
+        println!("pending         {}", s.asked);
         if !s.servers.is_empty() {
-            println!("\nserveurs");
+            println!("\nservers");
             for (name, n) in &s.servers {
                 println!("  {n:>8}  {name}");
             }
         }
         if !s.by_method.is_empty() {
-            println!("\nméthodes");
+            println!("\nmethods");
             for (m, n) in &s.by_method {
                 println!("  {n:>8}  {m}");
             }
@@ -299,22 +298,22 @@ fn print_line(line: &journal::LogLine, as_json: bool) {
         "<-"
     };
     let verdict = match line.verdict.as_deref() {
-        Some("deny") => "  BLOQUÉ",
-        Some("ask") => "  ATTENTE",
+        Some("deny") => "  BLOCKED",
+        Some("ask") => "  PENDING",
         _ => "",
     };
     println!(
         "{}  {arrow} {:<28} {:<12} {}{}",
         hhmmss(line.ts_ms),
-        line.method.as_deref().unwrap_or("(réponse)"),
+        line.method.as_deref().unwrap_or("(response)"),
         line.server.as_deref().unwrap_or("?"),
         line.scope_key,
         verdict
     );
 }
 
-/// Heure approchée sans dépendance de calendrier : on n'a besoin que de situer
-/// une ligne dans la journée.
+/// Approximate clock time with no calendar dependency: all we need is to place
+/// a line within the day.
 fn hhmmss(ms: i64) -> String {
     let secs = ms / 1000;
     let (h, m, s) = ((secs / 3600) % 24, (secs / 60) % 60, secs % 60);
@@ -326,15 +325,15 @@ fn hhmmss(ms: i64) -> String {
 // ---------------------------------------------------------------------------
 
 fn cmd_init(args: InitArgs) -> Result<()> {
-    // Le lien symbolique d'abord : les configs doivent pointer vers lui, jamais
-    // vers le chemin du bundle, sinon déplacer l'app casse tout.
+    // The symlink first: configs must point at it, never at the bundle path,
+    // otherwise moving the app breaks everything.
     let exe = std::env::current_exe()?;
     let shim = setup::ensure_shim_link(&exe)?;
     println!("shim  {} -> {}", shim.display(), exe.display());
 
     let targets = setup::discover(&args.projects);
     if targets.is_empty() {
-        println!("\naucune configuration MCP trouvée.");
+        println!("\nno MCP configuration found.");
         return Ok(());
     }
 
@@ -342,7 +341,7 @@ fn cmd_init(args: InitArgs) -> Result<()> {
     for t in &targets {
         match setup::plan(t, &shim) {
             Ok(p) => plans.push(p),
-            Err(e) => println!("\n{}  ignoré : {e}", t.path.display()),
+            Err(e) => println!("\n{}  skipped: {e}", t.path.display()),
         }
     }
 
@@ -351,7 +350,7 @@ fn cmd_init(args: InitArgs) -> Result<()> {
         if p.is_noop() {
             if !p.already.is_empty() {
                 println!(
-                    "\n{}  déjà enveloppé ({})",
+                    "\n{}  already wrapped ({})",
                     p.path.display(),
                     p.already.len()
                 );
@@ -360,20 +359,20 @@ fn cmd_init(args: InitArgs) -> Result<()> {
         }
         total += p.wrapped.len();
         println!("\n{}  [{}]", p.path.display(), p.kind.label());
-        println!("  serveurs : {}", p.wrapped.join(", "));
+        println!("  servers: {}", p.wrapped.join(", "));
         for line in setup::diff(&p.before, &p.after).lines() {
             println!("  {line}");
         }
     }
 
     if total == 0 {
-        println!("\nrien à faire.");
+        println!("\nnothing to do.");
         return Ok(());
     }
 
     if !args.apply {
-        // Rien n'est écrit sans que le diff ait été montré et accepté.
-        println!("\n{total} serveur(s) à envelopper. Relancez avec --apply pour écrire.");
+        // Nothing is written before the diff has been shown and accepted.
+        println!("\n{total} server(s) to wrap. Re-run with --apply to write.");
         return Ok(());
     }
 
@@ -382,26 +381,22 @@ fn cmd_init(args: InitArgs) -> Result<()> {
             continue;
         }
         let backup = setup::apply(p)?;
-        println!(
-            "écrit  {}  (sauvegarde {})",
-            p.path.display(),
-            backup.display()
-        );
+        println!("wrote  {}  (backup {})", p.path.display(), backup.display());
     }
 
-    println!("\nRedémarrez vos clients MCP pour que la nouvelle configuration prenne effet.");
-    println!("`mcpwall restore` remet tout en état.");
+    println!("\nRestart your MCP clients for the new configuration to take effect.");
+    println!("`mcpwall restore` puts everything back.");
     Ok(())
 }
 
 fn cmd_restore() -> Result<()> {
     let restored = setup::restore()?;
     if restored.is_empty() {
-        println!("aucune sauvegarde trouvée.");
+        println!("no backup found.");
         return Ok(());
     }
     for p in restored {
-        println!("restauré  {}", p.display());
+        println!("restored  {}", p.display());
     }
     Ok(())
 }
@@ -409,10 +404,10 @@ fn cmd_restore() -> Result<()> {
 fn cmd_policy() -> Result<()> {
     let path = ipc::policy_path();
     let policy = policy::Policy::load_or_create(&path)?;
-    println!("politique      {}", path.display());
-    println!("défaut         {}", policy.default_action().as_str());
+    println!("policy         {}", path.display());
+    println!("default        {}", policy.default_action().as_str());
     println!("fail_closed    {}", policy.fail_closed());
     println!("ask_timeout    {:?}", policy.ask_timeout());
-    println!("\nsyntaxe valide.");
+    println!("\nsyntax valid.");
     Ok(())
 }

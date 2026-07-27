@@ -1,7 +1,7 @@
-//! Serveur qui répond une charge utile de 8 Mo.
+//! A server that answers with an 8 MB payload.
 //!
-//! Vérifie l'absence d'interblocage par contre-pression : le shim doit drainer
-//! ce flux sans que l'autre direction cesse de progresser.
+//! Checks that back-pressure cannot deadlock: the shim must drain this stream
+//! without the other direction ceasing to make progress.
 
 fn main() {
     while let Some(line) = testservers::read_line() {

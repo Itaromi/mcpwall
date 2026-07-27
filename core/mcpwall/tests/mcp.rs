@@ -1,7 +1,7 @@
-//! Tests de sémantique MCP.
+//! MCP semantics tests.
 //!
-//! Deux obsessions : le scan de méthode ne doit jamais se tromper de clé, et
-//! `initialize` ne doit jamais pouvoir être bloqué.
+//! Two obsessions: the method scan must never pick the wrong key, and
+//! `initialize` must never be blockable.
 
 use mcpwall::mcp::{
     AllowAll, CallContext, ClientHello, DecisionPoint, Disposition, METHOD_SCAN_WINDOW, MethodScan,
@@ -11,57 +11,57 @@ use mcpwall::mcp::{
 fn found(frame: &[u8]) -> (String, bool) {
     match scan_method(frame) {
         MethodScan::Found { method, full_scan } => (method, full_scan),
-        other => panic!("méthode attendue, obtenu {other:?}"),
+        other => panic!("expected a method, got {other:?}"),
     }
 }
 
-// --- Scan de méthode : cas nominaux ---
+// --- Method scan: nominal cases ---
 
 #[test]
-fn methode_en_tete_de_frame() {
+fn method_at_the_head_of_the_frame() {
     let (m, full) = found(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{}}"#);
     assert_eq!(m, "tools/call");
-    assert!(!full, "doit tenir dans la fenêtre");
+    assert!(!full, "must fit inside the window");
 }
 
 #[test]
-fn notification_sans_id() {
+fn notification_without_an_id() {
     let (m, _) = found(br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);
     assert_eq!(m, "notifications/initialized");
 }
 
 #[test]
-fn reponse_sans_methode() {
+fn response_without_a_method() {
     let frame = br#"{"jsonrpc":"2.0","id":1,"result":{"content":[]}}"#;
     assert_eq!(scan_method(frame), MethodScan::NoMethod);
     assert_eq!(classify(&MethodScan::NoMethod), Disposition::Passthrough);
 }
 
 #[test]
-fn espaces_autour_des_deux_points() {
+fn whitespace_around_the_colon() {
     let (m, _) = found(br#"{ "method" : "tools/call" , "id" : 1 }"#);
     assert_eq!(m, "tools/call");
 }
 
-// --- Scan de méthode : les pièges ---
+// --- Method scan: the traps ---
 
 #[test]
-fn clef_method_imbriquee_ignoree() {
-    // Une recherche de sous-chaîne naïve rendrait "x". Le suivi de profondeur
-    // impose que `method` soit une clé de l'objet racine.
+fn nested_method_key_ignored() {
+    // A naive substring search would return "x". Depth tracking requires
+    // `method` to be a key of the root object.
     let (m, _) = found(br#"{"params":{"method":"x"},"method":"tools/call","id":1}"#);
     assert_eq!(m, "tools/call");
 }
 
 #[test]
-fn method_en_valeur_et_non_en_clef() {
-    // Ici "method" apparaît comme *valeur* de "kind". Ne doit pas être retenu.
+fn method_as_a_value_and_not_a_key() {
+    // Here "method" appears as the *value* of "kind". It must not be taken.
     let (m, _) = found(br#"{"kind":"method","method":"resources/read","id":1}"#);
     assert_eq!(m, "resources/read");
 }
 
 #[test]
-fn method_uniquement_en_valeur_ne_donne_rien() {
+fn method_only_as_a_value_yields_nothing() {
     assert_eq!(
         scan_method(br#"{"kind":"method","id":1,"result":{}}"#),
         MethodScan::NoMethod
@@ -69,18 +69,18 @@ fn method_uniquement_en_valeur_ne_donne_rien() {
 }
 
 #[test]
-fn accolade_dans_une_chaine_ne_fausse_pas_la_profondeur() {
+fn a_brace_inside_a_string_does_not_skew_the_depth() {
     let (m, _) = found(br#"{"id":"a{b}c","method":"tools/call"}"#);
     assert_eq!(m, "tools/call");
 }
 
-// --- Évasion de classement par échappement ---
+// --- Escaping one's way out of classification ---
 
 #[test]
-fn guillemet_echappe_avant_method_ne_masque_pas_la_methode() {
-    // Le piège : un scan qui renonce sur le premier `\` classerait ça en
-    // Unparsable, donc Observe, donc hors du point de décision. Un `id` bien
-    // choisi suffirait à contourner la politique.
+fn an_escaped_quote_before_method_does_not_hide_the_method() {
+    // The trap: a scan that bails on the first `\` would classify this as
+    // Unparsable, hence Observe, hence outside the decision point. A
+    // well-chosen `id` would be enough to bypass the policy.
     let (m, _) = found(br#"{"id":"a\"b","method":"tools/call"}"#);
     assert_eq!(m, "tools/call");
     assert_eq!(
@@ -90,29 +90,29 @@ fn guillemet_echappe_avant_method_ne_masque_pas_la_methode() {
 }
 
 #[test]
-fn accolade_echappee_ne_fausse_pas_la_profondeur() {
+fn an_escaped_backslash_does_not_skew_the_depth() {
     let (m, _) = found(br#"{"id":"a\\","method":"resources/read"}"#);
     assert_eq!(m, "resources/read");
 }
 
 #[test]
-fn faux_method_echappe_dans_une_valeur_ne_trompe_pas() {
-    // `"method"` apparaît, échappé, à l'intérieur d'une valeur de chaîne.
+fn a_fake_escaped_method_inside_a_value_does_not_fool_us() {
+    // `"method"` appears, escaped, inside a string value.
     let (m, _) = found(br#"{"id":"x \"method\":\"evil\" y","method":"tools/call"}"#);
     assert_eq!(m, "tools/call");
 }
 
 #[test]
-fn methode_avec_echappement_refuse_le_point_de_decision() {
-    // On ne décode pas les échappements ; on refuse donc de conclure plutôt que
-    // de deviner. Observe, jamais Decide.
+fn a_method_containing_an_escape_is_kept_out_of_the_decision_point() {
+    // We do not decode escapes; we therefore refuse to conclude rather than
+    // guess. Observe, never Decide.
     let scan = scan_method(br#"{"method":"tools\/call","id":1}"#);
     assert_eq!(scan, MethodScan::Unparsable);
     assert_eq!(classify(&scan), Disposition::Observe);
 }
 
 #[test]
-fn method_non_textuelle_est_unparsable() {
+fn a_non_textual_method_is_unparsable() {
     assert_eq!(
         scan_method(br#"{"method":42,"id":1}"#),
         MethodScan::Unparsable
@@ -120,9 +120,9 @@ fn method_non_textuelle_est_unparsable() {
 }
 
 #[test]
-fn frame_tronquee_est_unparsable_pas_nomethod() {
-    // Le silence est interdit : une frame coupée ne doit pas se faire passer
-    // pour une réponse légitime sans méthode.
+fn a_truncated_frame_is_unparsable_not_nomethod() {
+    // Silence is forbidden: a cut frame must not pass itself off as a
+    // legitimate response with no method.
     assert_eq!(
         scan_method(br#"{"jsonrpc":"2.0","id":1,"meth"#),
         MethodScan::Unparsable
@@ -134,29 +134,29 @@ fn frame_tronquee_est_unparsable_pas_nomethod() {
 }
 
 #[test]
-fn tableau_batch_ne_donne_pas_de_methode() {
-    // Le batch est retiré de la spec depuis 2025-06-18 ; on ne le traite pas
-    // ici, on refuse juste d'en extraire une méthode.
+fn a_batch_array_yields_no_method() {
+    // Batching was removed from the spec as of 2025-06-18; we do not handle it
+    // here, we merely refuse to extract a method from it.
     assert_eq!(
         scan_method(br#"[{"method":"tools/call","id":1}]"#),
         MethodScan::NoMethod
     );
 }
 
-// --- Le repli hors fenêtre ---
+// --- The out-of-window fallback ---
 
 #[test]
-fn method_repoussee_hors_fenetre_par_un_id_long() {
+fn method_pushed_out_of_the_window_by_a_long_id() {
     let id = "z".repeat(METHOD_SCAN_WINDOW * 2);
     let frame = format!(r#"{{"jsonrpc":"2.0","id":"{id}","method":"tools/call"}}"#);
 
     let (m, full) = found(frame.as_bytes());
     assert_eq!(m, "tools/call");
-    assert!(full, "le repli sur passe complète doit être signalé");
+    assert!(full, "the fallback to a full pass must be reported");
 }
 
 #[test]
-fn method_repoussee_par_params_serialise_en_premier() {
+fn method_pushed_out_by_params_serialised_first() {
     let blob = "a".repeat(METHOD_SCAN_WINDOW * 4);
     let frame = format!(r#"{{"params":{{"text":"{blob}"}},"method":"resources/read","id":1}}"#);
 
@@ -166,16 +166,16 @@ fn method_repoussee_par_params_serialise_en_premier() {
 }
 
 #[test]
-fn grosse_frame_sans_methode_reste_nomethod() {
+fn a_large_frame_with_no_method_stays_nomethod() {
     let blob = "b".repeat(METHOD_SCAN_WINDOW * 4);
     let frame = format!(r#"{{"id":1,"result":{{"text":"{blob}"}}}}"#);
     assert_eq!(scan_method(frame.as_bytes()), MethodScan::NoMethod);
 }
 
-// --- Classement ---
+// --- Classification ---
 
 #[test]
-fn ensemble_decide() {
+fn the_decide_set() {
     for m in [
         "tools/call",
         "resources/read",
@@ -188,9 +188,9 @@ fn ensemble_decide() {
 
 #[test]
 fn initialize_is_never_decidable() {
-    // La garde qui compte. Bloquer `initialize` ne protège de rien et tue la
-    // session entière. Ce test existe pour qu'un futur déplacement d'`initialize`
-    // vers l'ensemble DECIDE casse la CI plutôt que les sessions des gens.
+    // The guard that matters. Blocking `initialize` protects nothing and kills
+    // the whole session. This test exists so that a future move of
+    // `initialize` into the DECIDE set breaks CI rather than people's sessions.
     for m in ["initialize", "notifications/initialized"] {
         assert_eq!(disposition(m), Disposition::Observe, "{m}");
         assert_ne!(disposition(m), Disposition::Decide);
@@ -198,52 +198,52 @@ fn initialize_is_never_decidable() {
 }
 
 #[test]
-fn le_trafic_roots_est_observe() {
-    // Ces deux-là alimentent et invalident le maillon 2 du scope. Les laisser en
-    // passthrough ferait rater les changements de racines en cours de session.
+fn roots_traffic_is_observed() {
+    // These two feed and invalidate link 2 of the scope. Leaving them on
+    // passthrough would miss root changes mid-session.
     for m in ["roots/list", "notifications/roots/list_changed"] {
         assert_eq!(disposition(m), Disposition::Observe, "{m}");
     }
 }
 
 #[test]
-fn methode_inconnue_passe_en_passthrough() {
+fn an_unknown_method_falls_through() {
     assert_eq!(disposition("completion/complete"), Disposition::Passthrough);
     assert_eq!(disposition("ping"), Disposition::Passthrough);
 }
 
 #[test]
-fn unparsable_retombe_sur_observe_jamais_sur_decide() {
+fn unparsable_falls_back_to_observe_never_to_decide() {
     let d = classify(&MethodScan::Unparsable);
     assert_eq!(d, Disposition::Observe);
     assert_ne!(d, Disposition::Decide);
 }
 
 #[test]
-fn classement_de_bout_en_bout() {
+fn end_to_end_classification() {
     let frame = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x"}}"#;
     assert_eq!(classify(&scan_method(frame)), Disposition::Decide);
 }
 
-// --- Point de décision ---
+// --- Decision point ---
 
 #[test]
-fn m0_autorise_tout() {
+fn m0_allows_everything() {
     let ctx = CallContext {
         method: "tools/call",
         frame: b"{}",
     };
     assert_eq!(
-        AllowAll.decide(&ctx).expect("AllowAll ne peut pas échouer"),
+        AllowAll.decide(&ctx).expect("AllowAll cannot fail"),
         mcpwall::mcp::Verdict::Allow
     );
 }
 
-// --- Capture de l'initialize ---
+// --- Capturing initialize ---
 
 #[test]
-fn capture_du_hello_client() {
-    // Forme tirée de la spec 2025-11-25, basic/lifecycle.
+fn capturing_the_client_hello() {
+    // Shape taken from the 2025-11-25 spec, basic/lifecycle.
     let frame = br#"{
       "jsonrpc":"2.0","id":1,"method":"initialize",
       "params":{
@@ -266,17 +266,17 @@ fn capture_du_hello_client() {
 }
 
 #[test]
-fn client_sans_capacite_roots() {
+fn a_client_without_the_roots_capability() {
     let frame = br#"{"jsonrpc":"2.0","id":1,"method":"initialize",
       "params":{"protocolVersion":"2025-11-25","capabilities":{},
       "clientInfo":{"name":"C","version":"1"}}}"#;
     let hello = parse_client_hello(frame).unwrap();
-    assert!(!hello.supports_roots, "maillon 2 du scope indisponible");
+    assert!(!hello.supports_roots, "scope link 2 unavailable");
     assert!(!hello.roots_list_changed);
 }
 
 #[test]
-fn capture_du_hello_serveur() {
+fn capturing_the_server_hello() {
     let frame = br#"{
       "jsonrpc":"2.0","id":1,
       "result":{
@@ -299,9 +299,9 @@ fn capture_du_hello_serveur() {
 }
 
 #[test]
-fn la_version_negociee_vient_de_la_reponse_serveur() {
-    // Le serveur ne supporte pas ce que le client demande et répond avec une
-    // autre version. C'est celle-là qu'on stocke.
+fn the_negotiated_version_comes_from_the_server_response() {
+    // The server does not support what the client asked for and answers with
+    // another version. That is the one we store.
     let req = br#"{"jsonrpc":"2.0","id":1,"method":"initialize",
       "params":{"protocolVersion":"2025-11-25","capabilities":{},
       "clientInfo":{"name":"C","version":"1"}}}"#;
@@ -319,14 +319,14 @@ fn la_version_negociee_vient_de_la_reponse_serveur() {
 }
 
 #[test]
-fn hello_serveur_en_erreur_nest_pas_un_hello() {
+fn a_server_error_is_not_a_hello() {
     let frame = br#"{"jsonrpc":"2.0","id":1,"error":{"code":-32602,
       "message":"Unsupported protocol version"}}"#;
     assert!(parse_server_hello(frame).is_none());
 }
 
 #[test]
-fn hello_sur_json_invalide_ne_panique_pas() {
-    assert!(parse_client_hello(b"{ pas du json").is_none());
+fn a_hello_over_invalid_json_does_not_panic() {
+    assert!(parse_client_hello(b"{ not json").is_none());
     assert!(parse_server_hello(b"").is_none());
 }

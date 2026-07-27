@@ -1,10 +1,10 @@
 import Foundation
 
-/// Lance et surveille `mcpwall daemon`.
+/// Starts and supervises `mcpwall daemon`.
 ///
-/// L'app **ne réimplémente pas** le daemon : elle l'héberge comme processus
-/// enfant. Une seule source de vérité pour la politique et les décisions, et le
-/// core reste portable ailleurs que sur macOS.
+/// The app **does not reimplement** the daemon: it hosts it as a child process.
+/// One source of truth for the policy and the decisions, and the core stays
+/// portable beyond macOS.
 final class DaemonSupervisor: @unchecked Sendable {
     private let binary: URL
     private var process: Process?
@@ -23,18 +23,18 @@ final class DaemonSupervisor: @unchecked Sendable {
         queue.async { [weak self] in self?.launch() }
     }
 
-    /// Arrête le daemon proprement.
+    /// Stops the daemon cleanly.
     ///
-    /// Appelé à la fermeture de l'app. Sans ça, le daemon survivrait à
-    /// l'application censée l'héberger et son socket resterait en place, ce qui
-    /// empêcherait le prochain démarrage.
+    /// Called when the app closes. Without this, the daemon would outlive the
+    /// application meant to host it and its socket would stay behind, which
+    /// would prevent the next start.
     func stop() {
         queue.sync {
             stopping = true
             guard let process, process.isRunning else { return }
             process.terminate()
 
-            // Laisser le temps du retrait du socket avant d'insister.
+            // Allow time for the socket to be removed before insisting.
             let deadline = Date().addingTimeInterval(3)
             while process.isRunning && Date() < deadline {
                 Thread.sleep(forTimeInterval: 0.05)
@@ -51,15 +51,15 @@ final class DaemonSupervisor: @unchecked Sendable {
         let process = Process()
         process.executableURL = binary
         process.arguments = ["daemon"]
-        // Le daemon écrit ses diagnostics sur stderr ; on les laisse aller au
-        // journal système plutôt que de les mettre en tampon dans l'app.
+        // The daemon writes its diagnostics to stderr; we let them go to the
+        // system log rather than buffering them inside the app.
         process.standardOutput = FileHandle.nullDevice
 
         process.terminationHandler = { [weak self] proc in
             guard let self else { return }
             self.queue.async {
                 guard !self.stopping else { return }
-                NSLog("mcpwall: daemon terminé (code \(proc.terminationStatus)), relance")
+                NSLog("mcpwall: daemon exited (code \(proc.terminationStatus)), restarting")
                 self.scheduleRestart()
             }
         }
@@ -68,28 +68,28 @@ final class DaemonSupervisor: @unchecked Sendable {
             lastStart = Date()
             try process.run()
             self.process = process
-            NSLog("mcpwall: daemon démarré (pid \(process.processIdentifier))")
+            NSLog("mcpwall: daemon started (pid \(process.processIdentifier))")
         } catch {
-            NSLog("mcpwall: lancement du daemon impossible : \(error)")
+            NSLog("mcpwall: could not start the daemon: \(error)")
             scheduleRestart()
         }
     }
 
-    /// Relance avec un recul croissant.
+    /// Restarts with exponential backoff.
     ///
-    /// Un daemon qui échoue au démarrage — socket occupé, politique illisible —
-    /// ne doit pas être relancé en boucle serrée : ça consommerait la machine
-    /// sans jamais réussir, et noierait la cause réelle dans les journaux.
+    /// A daemon that fails at startup — socket taken, policy unreadable — must
+    /// not be restarted in a tight loop: that would burn the machine without
+    /// ever succeeding, and drown the real cause in the logs.
     private func scheduleRestart() {
-        // Un daemon qui a tourné longtemps repart de zéro : c'est un incident
-        // isolé, pas une boucle d'échec.
+        // A daemon that ran for a long time starts from zero again: that is an
+        // isolated incident, not a failure loop.
         if Date().timeIntervalSince(lastStart) > 60 {
             restarts = 0
         }
         restarts += 1
 
         guard restarts <= 10 else {
-            NSLog("mcpwall: le daemon échoue en boucle, relance abandonnée")
+            NSLog("mcpwall: the daemon keeps failing, giving up on restarting")
             return
         }
 

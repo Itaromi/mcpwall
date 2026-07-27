@@ -1,18 +1,18 @@
-//! Relais stdio entre un client MCP et un serveur MCP amont.
+//! Stdio relay between an MCP client and an upstream MCP server.
 //!
-//! Premier module à I/O du core, et le seul dont une erreur casse une vraie
-//! session d'agent. Trois règles y sont tenues sans exception :
+//! The first I/O module in the core, and the only one whose bugs break a real
+//! agent session. Three rules are held here without exception:
 //!
-//! 1. **Aucun `unwrap()`, aucune panique.** Une panique du shim, c'est la
-//!    session de l'utilisateur qui meurt.
-//! 2. **On réémet les octets reçus**, via [`Frame::raw`]. Jamais du JSON
-//!    reconstruit.
-//! 3. **Un échec d'inspection ne casse pas le relais.** Frame incomprise,
-//!    dépassement de plafond, observateur en difficulté : le trafic continue.
-//!    C'est la règle de disponibilité §4 appliquée au plus bas niveau.
+//! 1. **No `unwrap()`, no panics.** A panicking shim means the user's session
+//!    dies.
+//! 2. **We re-emit the bytes we received**, via [`Frame::raw`]. Never
+//!    reconstructed JSON.
+//! 3. **A failed inspection does not break the relay.** Frame not understood,
+//!    ceiling exceeded, observer in trouble: traffic continues. That is the
+//!    availability rule of §4 applied at the lowest level.
 //!
-//! Le relais est générique sur `AsyncRead`/`AsyncWrite` et ne connaît ni SQLite
-//! ni processus : il se teste avec des tampons en mémoire.
+//! The relay is generic over `AsyncRead`/`AsyncWrite` and knows nothing of
+//! SQLite or processes: it can be tested with in-memory buffers.
 
 use std::io;
 use std::sync::Arc;
@@ -26,15 +26,15 @@ use crate::mcp::{
     scan_method,
 };
 
-/// Taille des lectures. Un tampon de pipe fait typiquement 64 Ko.
+/// Read size. A pipe buffer is typically 64 KB.
 const READ_BUF: usize = 64 * 1024;
 
-/// Sens de circulation d'une frame.
+/// Which way a frame is travelling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
-    /// Client → serveur amont. C'est le sens où l'on peut bloquer.
+    /// Client → upstream server. This is the direction where blocking happens.
     ToServer,
-    /// Serveur amont → client.
+    /// Upstream server → client.
     ToClient,
 }
 
@@ -53,30 +53,31 @@ impl std::fmt::Display for Direction {
     }
 }
 
-/// Une frame observée, avec ce qu'on en a compris.
+/// An observed frame, along with what we made of it.
 pub struct FrameEvent<'a> {
     pub direction: Direction,
     pub disposition: Disposition,
-    /// `None` pour une réponse, ou pour une frame dont la méthode n'a pas pu
-    /// être lue — [`FrameEvent::scan`] dit lequel des deux.
+    /// `None` for a response, or for a frame whose method could not be read —
+    /// [`FrameEvent::scan`] says which of the two.
     pub method: Option<&'a str>,
     pub scan: &'a MethodScan,
-    /// Renseigné uniquement pour les frames passées par le point de décision.
+    /// Filled in only for frames that went through the decision point.
     pub verdict: Option<&'a Verdict>,
     pub frame: &'a Frame,
 }
 
-/// Ce qui n'aurait pas dû arriver mais dont on ne meurt pas.
+/// Things that should not have happened but are not fatal.
 #[derive(Debug)]
 pub enum Anomaly {
-    /// Frame dépassant le plafond. Les octets sont jetés, jamais relayés.
+    /// Frame over the ceiling. The bytes are discarded, never relayed.
     Oversize { direction: Direction, limit: usize },
-    /// Flux terminé sur une frame sans délimiteur.
+    /// Stream ended on a frame with no delimiter.
     Unterminated { direction: Direction },
-    /// Frame bloquée qui n'attend aucune réponse : rien à renvoyer au client.
+    /// A blocked frame that expects no response: nothing to send back to the
+    /// client.
     DeniedWithoutId { direction: Direction },
-    /// Le point de décision n'a pas pu se prononcer. Le trafic est passé — ou
-    /// a été bloqué si `fail_closed` est actif.
+    /// The decision point could not rule. Traffic went through — or was
+    /// blocked, if `fail_closed` is on.
     DecisionUnavailable {
         direction: Direction,
         reason: String,
@@ -84,10 +85,10 @@ pub enum Anomaly {
     },
 }
 
-/// Destination de tout ce que le relais observe.
+/// Destination for everything the relay observes.
 ///
-/// En M0 c'est le journal SQLite. Les méthodes ne rendent rien : un observateur
-/// n'a aucun moyen d'interrompre le relais, par construction.
+/// In M0 this is the SQLite journal. The methods return nothing: an observer
+/// has no way of interrupting the relay, by construction.
 pub trait Observer: Send + Sync {
     fn on_frame(&self, event: &FrameEvent<'_>);
 
@@ -95,39 +96,40 @@ pub trait Observer: Send + Sync {
         let _ = anomaly;
     }
 
-    /// Fin de flux, avec les compteurs du découpeur.
+    /// End of stream, with the splitter's counters.
     fn on_eof(&self, direction: Direction, stats: SplitterStats) {
         let _ = (direction, stats);
     }
 }
 
-/// Observateur qui jette tout. Utile pour mesurer le coût du relais nu.
+/// An observer that throws everything away. Useful to measure the cost of the
+/// bare relay.
 pub struct NullObserver;
 
 impl Observer for NullObserver {
     fn on_frame(&self, _event: &FrameEvent<'_>) {}
 }
 
-/// Configuration d'une pompe.
+/// Configuration of one pump.
 pub struct Pump {
     pub direction: Direction,
     pub max_frame_bytes: usize,
     pub observer: Arc<dyn Observer>,
     pub decision: Arc<dyn DecisionPoint>,
-    /// Voie de retour pour les réponses de blocage.
+    /// Return path for block responses.
     ///
-    /// Un `deny` intervient sur une frame qui monte vers le serveur, mais la
-    /// réponse doit redescendre vers le client — c'est-à-dire sortir par
-    /// **l'autre** pompe. D'où ce canal entre les deux. Sans lui, bloquer
-    /// laisserait le client attendre indéfiniment une réponse qui ne vient pas.
+    /// A `deny` happens on a frame going up to the server, but the response has
+    /// to come back down to the client — that is, leave through the **other**
+    /// pump. Hence this channel between the two. Without it, blocking would
+    /// leave the client waiting forever for a response that never comes.
     pub denied_tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
 }
 
 impl Pump {
-    /// Relaie `reader` vers `writer` jusqu'à la fin du flux.
+    /// Relays `reader` into `writer` until end of stream.
     ///
-    /// `injected` alimente le flux sortant en frames qui ne viennent pas de
-    /// `reader` — les réponses de blocage fabriquées par l'autre pompe.
+    /// `injected` feeds the outgoing stream with frames that do not come from
+    /// `reader` — the block responses manufactured by the other pump.
     pub async fn run<R, W>(
         &self,
         mut reader: R,
@@ -143,8 +145,8 @@ impl Pump {
 
         loop {
             let read = match &mut injected {
-                // Les deux sources sont concurrentes : une réponse de blocage ne
-                // doit pas attendre que l'amont daigne écrire quelque chose.
+                // The two sources are concurrent: a block response must not
+                // wait for the upstream to deign to write something.
                 Some(rx) => tokio::select! {
                     biased;
                     Some(payload) = rx.recv() => {
@@ -172,9 +174,10 @@ impl Pump {
                         }
                     }
                     Err(FrameError::Oversize { limit }) => {
-                        // Les octets sont déjà jetés par le découpeur, rien ne
-                        // part vers le pair. On note et on continue : le
-                        // découpeur se resynchronise au prochain délimiteur.
+                        // The bytes have already been discarded by the
+                        // splitter, nothing goes to the peer. We note it and
+                        // carry on: the splitter resynchronises at the next
+                        // delimiter.
                         self.observer.on_anomaly(&Anomaly::Oversize {
                             direction: self.direction,
                             limit,
@@ -183,16 +186,16 @@ impl Pump {
                 }
             }
 
-            // Un seul flush par lecture plutôt qu'un par frame : six frames dans
-            // un même read() ne doivent pas coûter six syscalls.
+            // One flush per read rather than one per frame: six frames in the
+            // same read() must not cost six syscalls.
             if wrote {
                 writer.flush().await?;
             }
         }
 
-        // Dernière frame sans délimiteur : on la relaie quand même — perdre le
-        // dernier message d'une session serait pire — mais en ajoutant le
-        // terminateur, faute de quoi le pair attendrait la suite indéfiniment.
+        // Trailing frame with no delimiter: we relay it anyway — losing the
+        // last message of a session would be worse — but we append the
+        // terminator, without which the peer would wait forever for the rest.
         if let Some(frame) = splitter.finish() {
             self.observer.on_anomaly(&Anomaly::Unterminated {
                 direction: self.direction,
@@ -209,7 +212,7 @@ impl Pump {
         Ok(())
     }
 
-    /// Inspecte, décide, relaie. Rend `true` si quelque chose a été écrit.
+    /// Inspects, decides, relays. Returns `true` if anything was written.
     async fn handle<W>(&self, frame: &Frame, writer: &mut W) -> io::Result<bool>
     where
         W: AsyncWrite + Unpin,
@@ -221,8 +224,8 @@ impl Pump {
             _ => None,
         };
 
-        // Seul le sens montant passe par le point de décision, et seulement pour
-        // l'ensemble DECIDE. Tout le reste évite l'appel entièrement.
+        // Only the upward direction goes through the decision point, and only
+        // for the DECIDE set. Everything else skips the call entirely.
         let verdict = match (self.direction, disposition, method) {
             (Direction::ToServer, Disposition::Decide, Some(m)) => {
                 let ctx = CallContext {
@@ -231,12 +234,12 @@ impl Pump {
                 };
                 match self.decision.decide(&ctx) {
                     Ok(v) => Some(v),
-                    // Le point de décision n'a pas su répondre. On ne panique
-                    // pas, on ne devine pas : par défaut le trafic passe, et
-                    // l'incident est signalé. Casser la session d'un agent
-                    // parce que notre propre daemon est tombé serait le pire
-                    // arbitrage possible — sauf si l'utilisateur a explicitement
-                    // demandé `fail_closed`.
+                    // The decision point could not answer. We do not panic and
+                    // we do not guess: by default traffic goes through, and the
+                    // incident is reported. Breaking an agent's session because
+                    // our own daemon went down would be the worst possible
+                    // trade — unless the user explicitly asked for
+                    // `fail_closed`.
                     Err(err) => {
                         let fail_closed = err.fail_closed;
                         self.observer.on_anomaly(&Anomaly::DecisionUnavailable {
@@ -265,14 +268,14 @@ impl Pump {
 
         match &verdict {
             Some(Verdict::Deny { rule, message }) => {
-                // La frame n'atteint jamais l'amont. La réponse part par la voie
-                // de retour, pas par ce writer.
+                // The frame never reaches the upstream. The response leaves via
+                // the return path, not through this writer.
                 match deny_response(frame.content(), rule, message) {
                     Some(payload) => {
                         if let Some(tx) = &self.denied_tx {
-                            // L'échec d'envoi signifie que l'autre pompe est
-                            // déjà terminée : la session se ferme, il n'y a plus
-                            // personne pour lire la réponse.
+                            // A send failure means the other pump has already
+                            // finished: the session is closing, there is nobody
+                            // left to read the response.
                             let _ = tx.send(payload);
                         }
                     }

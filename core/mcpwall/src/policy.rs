@@ -1,17 +1,17 @@
-//! Moteur de politique.
+//! Policy engine.
 //!
-//! Déterministe et lisible : aucune analyse par LLM, aucune heuristique
-//! opaque. Une règle qui déclenche doit pouvoir être expliquée à l'utilisateur
-//! en une phrase, sans quoi il ne peut pas décider.
+//! Deterministic and readable: no LLM analysis, no opaque heuristics. A rule
+//! that fires must be explainable to the user in one sentence, otherwise they
+//! cannot decide.
 //!
-//! Deux principes de conception, tous deux dictés par la fatigue d'alerte :
+//! Two design principles, both dictated by alert fatigue:
 //!
-//! - **Première règle qui matche, dans l'ordre du fichier.** Pas de score, pas
-//!   de combinaison. L'utilisateur doit pouvoir prédire ce qui va se passer en
-//!   lisant son fichier de haut en bas.
-//! - **Un faux positif coûte plus cher qu'un faux négatif.** Une règle qui
-//!   interrompt à tort forme l'utilisateur à cliquer « autoriser » sans lire,
-//!   ce qui annule le produit entier.
+//! - **First matching rule, in file order.** No scoring, no combining. The
+//!   user must be able to predict what will happen by reading their file top to
+//!   bottom.
+//! - **A false positive costs more than a false negative.** A rule that
+//!   interrupts wrongly trains the user to click "allow" without reading, which
+//!   negates the entire product.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -23,7 +23,7 @@ use serde::Deserialize;
 use crate::scope::Scope;
 
 // ---------------------------------------------------------------------------
-// Modèle du fichier
+// File model
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
@@ -56,7 +56,7 @@ pub enum Severity {
     Critical,
 }
 
-/// Portée d'un override.
+/// Scope of an override.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Until {
@@ -69,28 +69,28 @@ pub enum Until {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct When {
-    /// Motifs glob sur les chemins trouvés dans les arguments.
+    /// Glob patterns against paths found in the arguments.
     #[serde(default)]
     pub arg_path_matches: Vec<String>,
-    /// Motifs glob sur le nom de l'outil.
+    /// Glob patterns against the tool name.
     #[serde(default)]
     pub tool_matches: Vec<String>,
-    /// Un chemin d'argument sort-il du projet ?
+    /// Does an argument path leave the project?
     #[serde(default)]
     pub path_outside_cwd: bool,
-    /// Un argument ressemble-t-il à un secret ?
+    /// Does an argument look like a secret?
     #[serde(default)]
     pub arg_matches_secret: bool,
-    /// Un argument contient-il des données locales marquées. **M3.**
+    /// Does an argument contain tainted local data? **M3.**
     #[serde(default)]
     pub arg_contains_tainted: bool,
-    /// L'outil est-il considéré comme sortant ? **M3.**
+    /// Is the tool considered outbound? **M3.**
     #[serde(default)]
     pub tool_is_outbound: bool,
-    /// La description de l'outil a-t-elle changé ? **M3.**
+    /// Has the tool's description changed? **M3.**
     #[serde(default)]
     pub tool_description_drift: bool,
-    /// Méthodes MCP concernées. Vide = toutes celles de l'ensemble DECIDE.
+    /// MCP methods concerned. Empty = all those in the DECIDE set.
     #[serde(default)]
     pub method_matches: Vec<String>,
 }
@@ -104,7 +104,7 @@ pub struct Rule {
     pub action: Action,
     #[serde(default)]
     pub severity: Severity,
-    /// Explication montrée à l'utilisateur. À défaut, l'`id` sert de message.
+    /// Explanation shown to the user. Failing that, the `id` serves as the message.
     #[serde(default)]
     pub message: Option<String>,
 }
@@ -112,9 +112,9 @@ pub struct Rule {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Override {
-    /// Clé de scope, telle que produite par [`Scope::key`].
+    /// Scope key, as produced by [`Scope::key`].
     pub scope: String,
-    /// Nom d'outil, motif glob accepté.
+    /// Tool name; a glob pattern is accepted.
     pub tool: String,
     pub action: Action,
     #[serde(default)]
@@ -126,9 +126,9 @@ pub struct Override {
 pub struct PolicyFile {
     #[serde(default)]
     pub default: Action,
-    /// Bloquer quand le daemon est injoignable. **Faux par défaut, et ce défaut
-    /// est un choix produit** : si fermer l'app casse tous les serveurs MCP de
-    /// l'utilisateur, mcpwall est désinstallé dans l'heure.
+    /// Block when the daemon is unreachable. **False by default, and that
+    /// default is a product decision**: if closing the app breaks every one of
+    /// the user's MCP servers, mcpwall is uninstalled within the hour.
     #[serde(default)]
     pub fail_closed: bool,
     #[serde(default = "default_ask_timeout")]
@@ -155,20 +155,20 @@ impl Default for PolicyFile {
     }
 }
 
-/// Politique par défaut, écrite au premier lancement.
+/// Default policy, written on first launch.
 ///
-/// Volontairement courte et entièrement en `ask` : au repos mcpwall ne doit
-/// rien demander, et seules les règles à haute confiance interrompent.
-pub const DEFAULT_POLICY_YAML: &str = r#"# Politique mcpwall.
-# Première règle qui correspond, dans l'ordre de lecture.
+/// Deliberately short and entirely `ask`: at rest mcpwall must ask nothing, and
+/// only high-confidence rules interrupt.
+pub const DEFAULT_POLICY_YAML: &str = r#"# mcpwall policy.
+# First matching rule wins, in reading order.
 
 default: allow
 fail_closed: false
 ask_timeout_seconds: 60
 
 rules:
-  # Lecture d'un secret local. Haute confiance : ces chemins ne sont pas lus
-  # par accident.
+  # Reading a local secret. High confidence: these paths are not read by
+  # accident.
   - id: secrets_paths
     when:
       arg_path_matches:
@@ -181,50 +181,50 @@ rules:
         - "**/.netrc"
     action: ask
     severity: high
-    message: "accès à un fichier de secrets"
+    message: "access to a secrets file"
 
-  # Un secret repéré dans les arguments d'un appel.
+  # A secret spotted in a call's arguments.
   - id: secret_pattern
     when:
       arg_matches_secret: true
     action: ask
     severity: high
-    message: "un argument ressemble à un identifiant secret"
+    message: "an argument looks like a secret credential"
 
-  # Écriture hors du projet courant.
+  # Write outside the current project.
   - id: outside_project_write
     when:
       tool_matches: ["*write*", "*edit*", "*delete*", "*remove*", "*move*"]
       path_outside_cwd: true
     action: ask
     severity: medium
-    message: "écriture en dehors du projet"
+    message: "write outside the project"
 
-  # M3 : nécessite le suivi de teinte, inactif pour l'instant.
+  # M3: requires taint tracking, inactive for now.
   - id: taint_exfil
     when:
       arg_contains_tainted: true
       tool_is_outbound: true
     action: deny
     severity: critical
-    message: "donnée locale marquée dans un argument sortant"
+    message: "tainted local data in an outbound argument"
 
-  # M3 : nécessite la détection de dérive des descriptions.
+  # M3: requires description drift detection.
   - id: tool_description_changed
     when:
       tool_description_drift: true
     action: ask
     severity: high
-    message: "la description de cet outil a changé depuis la dernière session"
+    message: "this tool's description changed since the last session"
 
 overrides: []
 "#;
 
 // ---------------------------------------------------------------------------
-// Politique compilée
+// Compiled policy
 // ---------------------------------------------------------------------------
 
-/// Une règle avec ses globs compilés.
+/// A rule with its globs compiled.
 struct CompiledRule {
     rule: Rule,
     arg_paths: Option<GlobSet>,
@@ -236,7 +236,7 @@ pub struct Policy {
     file: PolicyFile,
     rules: Vec<CompiledRule>,
     overrides: Vec<(Override, Option<GlobSet>)>,
-    /// Date du fichier au chargement, pour le rechargement à chaud.
+    /// File mtime at load time, for hot reloading.
     loaded_mtime: Option<SystemTime>,
     path: Option<PathBuf>,
 }
@@ -249,34 +249,32 @@ impl Default for Policy {
 
 impl Policy {
     pub fn parse(text: &str) -> Result<PolicyFile> {
-        // Un fichier vide se désérialiserait en « tout par défaut », c'est-à-dire
-        // en `default: allow` sans aucune règle : le pare-feu se désactiverait
-        // en silence. Ça n'arrive pas qu'en théorie — disque plein, éditeur
-        // interrompu, écriture partielle. On refuse, et l'appelant conserve la
-        // politique précédente.
+        // An empty file would deserialise into "everything by default", that
+        // is `default: allow` with no rules at all: the firewall would disable
+        // itself silently. This is not merely theoretical — full disk,
+        // interrupted editor, partial write. We refuse, and the caller keeps
+        // the previous policy.
         if text.trim().is_empty() {
-            anyhow::bail!(
-                "politique vide — refusée pour ne pas désactiver le filtrage sans le dire"
-            );
+            anyhow::bail!("empty policy — refused, so filtering is not disabled silently");
         }
-        serde_norway::from_str(text).context("politique illisible")
+        serde_norway::from_str(text).context("unreadable policy")
     }
 
-    /// Charge depuis un fichier, en l'écrivant s'il n'existe pas.
+    /// Loads from a file, writing it if it does not exist.
     pub fn load_or_create(path: &Path) -> Result<Self> {
         if !path.exists() {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).ok();
             }
             std::fs::write(path, DEFAULT_POLICY_YAML)
-                .with_context(|| format!("écriture de {}", path.display()))?;
+                .with_context(|| format!("writing {}", path.display()))?;
         }
         Self::load(path)
     }
 
     pub fn load(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("lecture de {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let file = Self::parse(&text)?;
         let mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
         Ok(Self::compile(file, Some(path.to_path_buf()), mtime))
@@ -309,11 +307,10 @@ impl Policy {
         }
     }
 
-    /// Recharge si le fichier a changé.
+    /// Reloads if the file has changed.
     ///
-    /// Comparaison de date plutôt que surveillance du système de fichiers : un
-    /// `stat` coûte moins qu'un observateur, et le rechargement n'a pas besoin
-    /// d'être instantané.
+    /// Comparing mtimes rather than watching the filesystem: a `stat` costs
+    /// less than a watcher, and reloading does not need to be instantaneous.
     pub fn reload_if_changed(&mut self) -> bool {
         let Some(path) = self.path.clone() else {
             return false;
@@ -327,13 +324,13 @@ impl Policy {
         match Self::load(&path) {
             Ok(fresh) => {
                 *self = fresh;
-                tracing::info!(fichier = %path.display(), "politique rechargée");
+                tracing::info!(file = %path.display(), "policy reloaded");
                 true
             }
             Err(e) => {
-                // On garde l'ancienne politique : un fichier à moitié édité ne
-                // doit pas ouvrir le pare-feu en grand ni le fermer d'un coup.
-                tracing::error!(erreur = %e, "politique invalide, l'ancienne reste active");
+                // We keep the old policy: a half-edited file must neither
+                // throw the firewall wide open nor slam it shut.
+                tracing::error!(error = %e, "invalid policy, the previous one stays active");
                 self.loaded_mtime = mtime;
                 false
             }
@@ -352,10 +349,10 @@ impl Policy {
         self.file.default
     }
 
-    /// Évalue une requête.
+    /// Evaluates a request.
     pub fn evaluate(&self, req: &Request<'_>) -> Decision {
-        // Les overrides passent avant les règles : ils traduisent une décision
-        // déjà prise par l'utilisateur, qu'on ne lui redemande pas.
+        // Overrides come before rules: they express a decision the user has
+        // already made, which we do not ask again.
         for (ov, tools) in &self.overrides {
             if ov.scope != req.scope_key {
                 continue;
@@ -369,7 +366,7 @@ impl Policy {
                     action: ov.action,
                     rule: Some("override".to_owned()),
                     severity: Severity::Info,
-                    message: format!("décision enregistrée pour {}", ov.scope),
+                    message: format!("decision recorded for {}", ov.scope),
                     findings: Vec::new(),
                 };
             }
@@ -387,7 +384,7 @@ impl Policy {
             action: self.file.default,
             rule: None,
             severity: Severity::Info,
-            message: "politique par défaut".to_owned(),
+            message: "default policy".to_owned(),
             findings,
         }
     }
@@ -400,10 +397,10 @@ impl Policy {
     ) -> Option<Decision> {
         let w = &c.rule.when;
 
-        // Une règle dont toutes les conditions sont vides ne matche rien : sinon
-        // une faute de frappe dans un nom de condition bloquerait tout le
-        // trafic. `deny_unknown_fields` attrape déjà la faute, ceci est la
-        // seconde barrière.
+        // A rule whose conditions are all empty matches nothing: otherwise a
+        // typo in a condition name would block all traffic.
+        // `deny_unknown_fields` already catches the typo; this is the second
+        // barrier.
         if is_empty_condition(w) {
             return None;
         }
@@ -439,10 +436,10 @@ impl Policy {
             return None;
         }
 
-        // M3. Tant que le suivi de teinte n'existe pas, ces conditions ne sont
-        // jamais vraies — et une règle qui les porte ne déclenche donc jamais.
-        // C'est volontaire : mieux vaut une règle inerte et visible dans le
-        // fichier qu'une règle absente qu'on oublierait d'écrire.
+        // M3. As long as taint tracking does not exist, these conditions are
+        // never true — so a rule carrying them never fires. That is
+        // deliberate: an inert rule visible in the file beats an absent rule we
+        // would forget to write.
         if w.arg_contains_tainted || w.tool_is_outbound || w.tool_description_drift {
             return None;
         }
@@ -478,9 +475,8 @@ fn build_globs(patterns: &[String]) -> Option<GlobSet> {
     }
     let mut b = GlobSetBuilder::new();
     for p in patterns {
-        // `~` est développé pour que la politique reste lisible ; les deux
-        // formes sont ajoutées, l'argument pouvant arriver sous l'une ou
-        // l'autre.
+        // `~` is expanded so the policy stays readable; both forms are added,
+        // since the argument may arrive as either.
         if let Ok(g) = Glob::new(p) {
             b.add(g);
         }
@@ -506,28 +502,28 @@ fn expand_tilde_str(p: &str) -> &str {
 }
 
 // ---------------------------------------------------------------------------
-// Requête et décision
+// Request and decision
 // ---------------------------------------------------------------------------
 
-/// Ce qu'on soumet au moteur.
+/// What we submit to the engine.
 pub struct Request<'a> {
     pub method: &'a str,
-    /// Nom de l'outil, pour `tools/call`.
+    /// Tool name, for `tools/call`.
     pub tool: Option<&'a str>,
-    /// Chemins repérés dans les arguments.
+    /// Paths spotted in the arguments.
     pub paths: Vec<String>,
-    /// Valeurs textuelles des arguments, pour la détection de secrets.
+    /// Textual values of the arguments, for secret detection.
     pub values: Vec<String>,
     pub scope_key: &'a str,
     pub scope_paths: &'a [PathBuf],
 }
 
 impl Request<'_> {
-    /// Un chemin d'argument sort-il du projet ?
+    /// Does an argument path leave the project?
     ///
-    /// Un scope inconnu ne rend jamais vrai : sans savoir où est le projet, on
-    /// ne peut pas dire qu'on en sort, et prétendre le contraire ferait
-    /// déclencher la règle sur tout le trafic de Claude Desktop.
+    /// An unknown scope never returns true: without knowing where the project
+    /// is, we cannot say we are leaving it, and pretending otherwise would fire
+    /// the rule on all of Claude Desktop's traffic.
     fn has_path_outside_scope(&self) -> bool {
         if self.scope_paths.is_empty() {
             return false;
@@ -535,14 +531,14 @@ impl Request<'_> {
         self.paths.iter().any(|p| {
             let abs = PathBuf::from(p);
             if !abs.is_absolute() {
-                return false; // relatif au cwd du serveur : hors de notre portée
+                return false; // relative to the server's cwd: beyond our reach
             }
             !self.scope_paths.iter().any(|root| abs.starts_with(root))
         })
     }
 }
 
-/// Extrait ce qui est évaluable d'un `tools/call` ou d'un `resources/read`.
+/// Extracts what is evaluable from a `tools/call` or a `resources/read`.
 pub fn request_from_frame<'a>(
     method: &'a str,
     frame: &[u8],
@@ -558,7 +554,7 @@ pub fn request_from_frame<'a>(
         if let Some(name) = params.get("name").and_then(|n| n.as_str()) {
             tool_buf.push_str(name);
         }
-        // `resources/read` porte son chemin dans `uri`.
+        // `resources/read` carries its path in `uri`.
         if let Some(uri) = params.get("uri").and_then(|u| u.as_str()) {
             if let Some(p) = crate::scope::parse_root_uri(uri) {
                 paths.push(p.to_string_lossy().into_owned());
@@ -578,10 +574,10 @@ pub fn request_from_frame<'a>(
     }
 }
 
-/// Parcourt les arguments en collectant chaînes et chemins.
+/// Walks the arguments, collecting strings and paths.
 fn walk(v: &serde_json::Value, paths: &mut Vec<String>, values: &mut Vec<String>, depth: u8) {
-    // Une profondeur bornée évite qu'un argument profondément imbriqué coûte du
-    // temps dans le chemin critique.
+    // A bounded depth keeps a deeply nested argument from costing time on the
+    // hot path.
     if depth > 8 {
         return;
     }
@@ -604,11 +600,11 @@ fn looks_like_path(s: &str) -> bool {
         && s.len() < 4096
 }
 
-/// Ce que le moteur a repéré dans les arguments.
+/// What the engine spotted in the arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Finding {
-    /// Un secret probable. **On ne stocke jamais la valeur** — seulement son
-    /// type et un préfixe tronqué, conformément aux conventions du projet.
+    /// A probable secret. **We never store the value** — only its kind and a
+    /// truncated prefix, per the project conventions.
     Secret { kind: &'static str, prefix: String },
 }
 
@@ -632,26 +628,26 @@ fn collect_findings(req: &Request<'_>) -> Vec<Finding> {
     out
 }
 
-/// Détecteurs de secrets, délibérément peu nombreux et à forte confiance.
+/// Secret detectors, deliberately few and high-confidence.
 ///
-/// Chaque motif ajouté ici est une source potentielle de faux positifs, et un
-/// faux positif bruyant coûte plus cher qu'un faux négatif : il apprend à
-/// l'utilisateur à cliquer « autoriser » sans lire.
+/// Every pattern added here is a potential source of false positives, and a
+/// noisy false positive costs more than a false negative: it teaches the user
+/// to click "allow" without reading.
 fn detect_secret(s: &str) -> Option<Finding> {
     let kind = if s.contains("-----BEGIN") && s.contains("PRIVATE KEY") {
-        "clé privée"
+        "private key"
     } else if starts_with_aws_key(s) {
-        "clé d'accès AWS"
+        "AWS access key"
     } else if (s.starts_with("ghp_") && s.len() >= 36)
         || (s.starts_with("github_pat_") && s.len() >= 40)
     {
-        // Deux préfixes, un seul type : les longueurs minimales diffèrent parce
-        // que les formats diffèrent, pas la nature du secret.
-        "jeton GitHub"
+        // Two prefixes, one kind: the minimum lengths differ because the
+        // formats differ, not the nature of the secret.
+        "GitHub token"
     } else if s.starts_with("sk-") && s.len() >= 20 {
-        "clé d'API"
+        "API key"
     } else if s.starts_with("xoxb-") || s.starts_with("xoxp-") {
-        "jeton Slack"
+        "Slack token"
     } else {
         return None;
     };
@@ -663,7 +659,7 @@ fn detect_secret(s: &str) -> Option<Finding> {
 }
 
 fn starts_with_aws_key(s: &str) -> bool {
-    // AKIA suivi de 16 caractères alphanumériques majuscules.
+    // AKIA followed by 16 uppercase alphanumeric characters.
     let Some(rest) = s.strip_prefix("AKIA") else {
         return false;
     };
@@ -673,25 +669,25 @@ fn starts_with_aws_key(s: &str) -> bool {
             .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
 }
 
-/// Préfixe tronqué, sûr à écrire en journal.
+/// Truncated prefix, safe to write to the journal.
 fn prefix(s: &str) -> String {
     s.chars().take(6).collect()
 }
 
-/// Ajoute un override permanent au fichier de politique.
+/// Appends a permanent override to the policy file.
 ///
-/// Écriture par ajout textuel plutôt que par réécriture du document : un
-/// `policy.yaml` est un fichier que l'utilisateur édite à la main, avec ses
-/// commentaires et son ordre de règles. Le relire, le sérialiser et le
-/// réécrire lui ferait perdre les deux — et la première fois que mcpwall
-/// détruit les commentaires de quelqu'un, il perd sa confiance.
+/// Written by appending text rather than by rewriting the document: a
+/// `policy.yaml` is a file the user edits by hand, with their comments and
+/// their rule ordering. Re-reading, serialising and rewriting it would lose
+/// both — and the first time mcpwall destroys someone's comments, it loses
+/// their trust.
 pub fn append_override(path: &Path, scope_key: &str, tool: &str, allow: bool) -> Result<()> {
     let text =
-        std::fs::read_to_string(path).with_context(|| format!("lecture de {}", path.display()))?;
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
 
-    // On valide avant d'écrire : mieux vaut refuser d'enregistrer une décision
-    // que de produire un fichier que le daemon ne saura plus relire.
-    Policy::parse(&text).context("politique existante illisible, override non ajouté")?;
+    // We validate before writing: better to refuse to record a decision than
+    // to produce a file the daemon can no longer read back.
+    Policy::parse(&text).context("existing policy unreadable, override not added")?;
 
     let action = if allow { "allow" } else { "deny" };
     let entry = format!(
@@ -701,7 +697,7 @@ pub fn append_override(path: &Path, scope_key: &str, tool: &str, allow: bool) ->
     );
 
     let mut updated = if text.contains("\noverrides:") || text.starts_with("overrides:") {
-        // `overrides: []` doit devenir une liste ouverte avant qu'on y ajoute.
+        // `overrides: []` must become an open list before we append to it.
         text.replace("overrides: []", "overrides:")
     } else {
         format!("{}\noverrides:\n", text.trim_end())
@@ -712,10 +708,10 @@ pub fn append_override(path: &Path, scope_key: &str, tool: &str, allow: bool) ->
     }
     updated.push_str(&entry);
 
-    // Relecture de contrôle : on n'écrit pas un fichier qu'on vient de casser.
-    Policy::parse(&updated).context("l'ajout aurait produit une politique invalide")?;
+    // Read-back check: we do not write a file we have just broken.
+    Policy::parse(&updated).context("the append would have produced an invalid policy")?;
 
-    std::fs::write(path, updated).with_context(|| format!("écriture de {}", path.display()))?;
+    std::fs::write(path, updated).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
 }
 
@@ -729,7 +725,7 @@ pub struct Decision {
 }
 
 impl Decision {
-    /// Message destiné à l'agent, tel qu'il apparaîtra dans `isError`.
+    /// Message intended for the agent, as it will appear in `isError`.
     pub fn agent_message(&self) -> String {
         if self.findings.is_empty() {
             return self.message.clone();

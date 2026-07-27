@@ -1,8 +1,7 @@
-//! Tests du relais.
+//! Relay tests.
 //!
-//! Tout se joue sur des tampons en mémoire : pas de processus, pas de SQLite.
-//! Ce que ces tests vérifient avant tout, c'est qu'aucune anomalie d'inspection
-//! n'interrompt le trafic.
+//! Everything runs on in-memory buffers: no processes, no SQLite. What these
+//! tests check above all is that no inspection anomaly interrupts traffic.
 
 use std::sync::{Arc, Mutex};
 
@@ -11,9 +10,9 @@ use mcpwall::mcp::{AllowAll, CallContext, DecisionError, DecisionPoint, Disposit
 use mcpwall::wrap::{Anomaly, Direction, FrameEvent, Observer, Pump};
 use tokio::sync::mpsc;
 
-// --- Outillage ---
+// --- Test harness ---
 
-/// Trace d'une frame vue par l'observateur.
+/// Record of a frame seen by the observer.
 struct Seen {
     #[allow(dead_code)]
     direction: Direction,
@@ -74,7 +73,7 @@ impl Recorder {
     }
 }
 
-/// Bloque tout ce qui atteint le point de décision.
+/// Blocks everything that reaches the decision point.
 struct DenyAll;
 
 impl DecisionPoint for DenyAll {
@@ -86,7 +85,7 @@ impl DecisionPoint for DenyAll {
     }
 }
 
-/// Point de décision en panne. Simule un daemon injoignable.
+/// A broken decision point. Simulates an unreachable daemon.
 struct Broken {
     fail_closed: bool,
 }
@@ -94,7 +93,7 @@ struct Broken {
 impl DecisionPoint for Broken {
     fn decide(&self, _ctx: &CallContext<'_>) -> Result<Verdict, DecisionError> {
         Err(DecisionError {
-            reason: "daemon injoignable".into(),
+            reason: "daemon unreachable".into(),
             fail_closed: self.fail_closed,
         })
     }
@@ -110,40 +109,40 @@ fn pump(direction: Direction, obs: Arc<Recorder>, dp: Arc<dyn DecisionPoint>) ->
     }
 }
 
-/// Relaie `input` et rend ce qui est sorti côté amont.
+/// Relays `input` and returns what came out on the upstream side.
 async fn relay(direction: Direction, input: &[u8], obs: Arc<Recorder>) -> Vec<u8> {
     let mut out = Vec::new();
     pump(direction, obs, Arc::new(AllowAll))
         .run(input, &mut out, None)
         .await
-        .expect("le relais ne doit pas échouer");
+        .expect("the relay must not fail");
     out
 }
 
-// --- Transparence ---
+// --- Transparency ---
 
 #[tokio::test]
-async fn le_relais_est_transparent() {
+async fn the_relay_is_transparent() {
     let input = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{}}\n\
                   {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n";
     let obs = Arc::new(Recorder::default());
     let out = relay(Direction::ToServer, input, obs.clone()).await;
 
-    assert_eq!(out, input, "octet pour octet");
+    assert_eq!(out, input, "byte for byte");
     assert_eq!(obs.count(), 2);
     assert_eq!(obs.methods(), vec!["tools/call"]);
 }
 
 #[tokio::test]
-async fn crlf_amont_preserve() {
-    // On ne normalise pas ce qu'on ne comprend pas : le pair reçoit ses octets.
+async fn upstream_crlf_is_preserved() {
+    // We do not normalise what we do not understand: the peer gets its bytes.
     let input = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\r\n";
     let obs = Arc::new(Recorder::default());
     assert_eq!(relay(Direction::ToClient, input, obs).await, input);
 }
 
 #[tokio::test]
-async fn charge_utile_de_plusieurs_megaoctets() {
+async fn a_multi_megabyte_payload() {
     let big = "z".repeat(4 * 1024 * 1024);
     let input = format!("{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"t\":\"{big}\"}}}}\n");
 
@@ -158,15 +157,15 @@ async fn charge_utile_de_plusieurs_megaoctets() {
     }
     .run(input.as_bytes(), &mut out, None)
     .await
-    .expect("relais");
+    .expect("relay");
 
     assert_eq!(out, input.as_bytes());
     assert_eq!(obs.count(), 1);
 }
 
 #[tokio::test]
-async fn frame_finale_sans_delimiteur_recoit_le_sien() {
-    // Sinon le pair attend indéfiniment la suite d'un message complet.
+async fn a_final_frame_without_a_delimiter_gets_one() {
+    // Otherwise the peer waits forever for the rest of a complete message.
     let obs = Arc::new(Recorder::default());
     let out = relay(
         Direction::ToClient,
@@ -179,15 +178,15 @@ async fn frame_finale_sans_delimiteur_recoit_le_sien() {
     assert_eq!(obs.count(), 1);
     assert!(
         obs.anomalies().iter().any(|a| a.contains("Unterminated")),
-        "l'anomalie doit être signalée : {:?}",
+        "the anomaly must be reported: {:?}",
         obs.anomalies()
     );
 }
 
-// --- Aucune anomalie n'interrompt le trafic ---
+// --- No anomaly interrupts traffic ---
 
 #[tokio::test]
-async fn frame_surdimensionnee_jetee_mais_le_flux_continue() {
+async fn an_oversized_frame_is_dropped_but_the_stream_continues() {
     let mut input = vec![b'x'; 4096];
     input.push(b'\n');
     input.extend_from_slice(b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n");
@@ -197,24 +196,24 @@ async fn frame_surdimensionnee_jetee_mais_le_flux_continue() {
 
     assert_eq!(
         out, b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n",
-        "les octets rejetés ne doivent pas atteindre l'amont, la suite si"
+        "the discarded bytes must not reach the upstream, what follows must"
     );
     assert!(obs.anomalies().iter().any(|a| a.contains("Oversize")));
     assert_eq!(obs.methods(), vec!["tools/list"]);
 }
 
 #[tokio::test]
-async fn json_malforme_relaye_quand_meme() {
-    // Ce n'est pas au shim de décider qu'un message est invalide : c'est au
-    // serveur amont de répondre son erreur. On journalise et on passe.
-    let input = b"pas du json du tout\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n";
+async fn malformed_json_is_relayed_anyway() {
+    // It is not the shim's place to decide a message is invalid: it is the
+    // upstream server's job to answer with its error. We journal and pass on.
+    let input = b"not json at all\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n";
     let obs = Arc::new(Recorder::default());
     assert_eq!(relay(Direction::ToServer, input, obs.clone()).await, input);
     assert_eq!(obs.count(), 2);
 }
 
 #[tokio::test]
-async fn lignes_vides_amont_absorbees() {
+async fn upstream_blank_lines_are_absorbed() {
     let input = b"\n\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n";
     let obs = Arc::new(Recorder::default());
     let out = relay(Direction::ToClient, input, obs.clone()).await;
@@ -223,9 +222,9 @@ async fn lignes_vides_amont_absorbees() {
 }
 
 #[tokio::test]
-async fn frames_eclatees_en_petits_morceaux() {
-    // Le relais doit être insensible au découpage des lectures, comme le
-    // découpeur qu'il utilise.
+async fn frames_broken_into_small_chunks() {
+    // The relay must be insensitive to how reads are split, like the splitter
+    // it uses.
     let input = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\"}\n\
                   {\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n";
 
@@ -244,25 +243,25 @@ async fn frames_eclatees_en_petits_morceaux() {
     pump(Direction::ToServer, obs.clone(), Arc::new(AllowAll))
         .run(&mut server, &mut out, None)
         .await
-        .expect("relais");
+        .expect("relay");
     let _ = feeder.await;
 
     assert_eq!(out, input);
     assert_eq!(obs.methods(), vec!["tools/call", "tools/list"]);
 }
 
-// --- Point de décision ---
+// --- Decision point ---
 
 #[tokio::test]
-async fn m0_ne_bloque_rien() {
+async fn m0_blocks_nothing() {
     let input = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{}}\n";
     let obs = Arc::new(Recorder::default());
     assert_eq!(relay(Direction::ToServer, input, obs).await, input);
 }
 
 #[tokio::test]
-async fn seul_le_sens_montant_consulte_le_point_de_decision() {
-    // Une réponse qui descend ne doit jamais être soumise à un verdict.
+async fn only_the_upward_direction_consults_the_decision_point() {
+    // A response coming down must never be submitted for a verdict.
     let input = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{}}\n";
     let obs = Arc::new(Recorder::default());
     let mut out = Vec::new();
@@ -270,15 +269,16 @@ async fn seul_le_sens_montant_consulte_le_point_de_decision() {
     pump(Direction::ToClient, obs.clone(), Arc::new(DenyAll))
         .run(&input[..], &mut out, None)
         .await
-        .expect("relais");
+        .expect("relay");
 
-    assert_eq!(out, input, "DenyAll ne doit pas s'appliquer en descente");
+    assert_eq!(out, input, "DenyAll must not apply on the way down");
 }
 
 #[tokio::test]
-async fn initialize_ne_peut_pas_etre_bloque() {
-    // La garde structurelle vue de bout en bout : même avec un point de décision
-    // qui refuse tout, `initialize` passe. Le bloquer tuerait la session.
+async fn initialize_cannot_be_blocked() {
+    // The structural guard seen end to end: even with a decision point that
+    // refuses everything, `initialize` goes through. Blocking it would kill the
+    // session.
     let input = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n";
     let obs = Arc::new(Recorder::default());
     let mut out = Vec::new();
@@ -286,13 +286,13 @@ async fn initialize_ne_peut_pas_etre_bloque() {
     pump(Direction::ToServer, obs.clone(), Arc::new(DenyAll))
         .run(&input[..], &mut out, None)
         .await
-        .expect("relais");
+        .expect("relay");
 
-    assert_eq!(out, input, "initialize doit atteindre l'amont");
+    assert_eq!(out, input, "initialize must reach the upstream");
 }
 
 #[tokio::test]
-async fn un_deny_ne_monte_pas_et_repond_au_client() {
+async fn a_deny_does_not_go_up_and_answers_the_client() {
     let input = b"{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"tools/call\",\
                   \"params\":{\"name\":\"http_post\"}}\n";
 
@@ -309,36 +309,33 @@ async fn un_deny_ne_monte_pas_et_repond_au_client() {
     }
     .run(&input[..], &mut upstream, None)
     .await
-    .expect("relais");
+    .expect("relay");
 
     assert!(
         upstream.is_empty(),
-        "la frame ne doit jamais atteindre l'amont"
+        "the frame must never reach the upstream"
     );
 
-    let payload = rx
-        .recv()
-        .await
-        .expect("une réponse de blocage est attendue");
+    let payload = rx.recv().await.expect("a block response is expected");
     let v: serde_json::Value = serde_json::from_slice(payload.trim_ascii_end()).expect("json");
 
-    // Forme §5 : un result valide, pas une erreur de protocole.
+    // Shape from §5: a valid result, not a protocol error.
     assert_eq!(v["jsonrpc"], "2.0");
-    assert_eq!(v["id"], 42, "l'id doit être celui de la requête bloquée");
+    assert_eq!(v["id"], 42, "the id must be that of the blocked request");
     assert_eq!(v["result"]["isError"], true);
-    assert!(v.get("error").is_none(), "jamais d'erreur JSON-RPC");
+    assert!(v.get("error").is_none(), "never a JSON-RPC error");
 
     let text = v["result"]["content"][0]["text"]
         .as_str()
         .unwrap_or_default();
     assert!(text.starts_with("blocked by mcpwall:"), "{text}");
     assert!(text.contains("rule: test_rule"), "{text}");
-    assert!(payload.ends_with(b"\n"), "frame prête à écrire");
+    assert!(payload.ends_with(b"\n"), "a frame ready to write");
 }
 
 #[tokio::test]
-async fn une_notification_bloquee_ne_produit_pas_de_reponse() {
-    // Pas d'id, donc rien n'attend de réponse. On jette et on le note.
+async fn a_blocked_notification_produces_no_response() {
+    // No id, so nothing is waiting for a response. We drop it and note it.
     let input = b"{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{}}\n";
 
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -354,13 +351,10 @@ async fn une_notification_bloquee_ne_produit_pas_de_reponse() {
     }
     .run(&input[..], &mut upstream, None)
     .await
-    .expect("relais");
+    .expect("relay");
 
     assert!(upstream.is_empty());
-    assert!(
-        rx.try_recv().is_err(),
-        "aucune réponse ne doit être fabriquée"
-    );
+    assert!(rx.try_recv().is_err(), "no response may be manufactured");
     assert!(
         obs.anomalies()
             .iter()
@@ -370,59 +364,59 @@ async fn une_notification_bloquee_ne_produit_pas_de_reponse() {
     );
 }
 
-// --- Voie de retour ---
+// --- Return path ---
 
 #[tokio::test]
-async fn les_reponses_de_blocage_sortent_par_la_pompe_descendante() {
-    // Le blocage se décide en montée mais la réponse redescend : sans cette
-    // voie de retour, le client attendrait indéfiniment.
+async fn block_responses_leave_through_the_downward_pump() {
+    // The block is decided on the way up but the response comes back down:
+    // without this return path, the client would wait forever.
     let (tx, rx) = mpsc::unbounded_channel();
     tx.send(b"{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"isError\":true}}\n".to_vec())
-        .expect("envoi");
+        .expect("send");
     drop(tx);
 
     let obs = Arc::new(Recorder::default());
     let mut out = Vec::new();
-    let amont = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n";
+    let upstream = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n";
 
     pump(Direction::ToClient, obs.clone(), Arc::new(AllowAll))
-        .run(&amont[..], &mut out, Some(rx))
+        .run(&upstream[..], &mut out, Some(rx))
         .await
-        .expect("relais");
+        .expect("relay");
 
-    let texte = String::from_utf8_lossy(&out);
+    let text = String::from_utf8_lossy(&out);
     assert!(
-        texte.contains("\"id\":7"),
-        "la frame injectée manque : {texte}"
+        text.contains("\"id\":7"),
+        "the injected frame is missing: {text}"
     );
     assert!(
-        texte.contains("\"id\":1"),
-        "le trafic amont manque : {texte}"
+        text.contains("\"id\":1"),
+        "the upstream traffic is missing: {text}"
     );
 }
 
-// --- Compteurs ---
+// --- Counters ---
 
 #[tokio::test]
-async fn les_compteurs_remontent_en_fin_de_flux() {
+async fn the_counters_are_reported_at_end_of_stream() {
     let input = b"\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\r\n";
     let obs = Arc::new(Recorder::default());
     relay(Direction::ToClient, input, obs.clone()).await;
 
-    let eof = obs.eof.lock().expect("verrou");
-    let (direction, stats) = eof.first().expect("un eof attendu");
+    let eof = obs.eof.lock().expect("lock");
+    let (direction, stats) = eof.first().expect("one eof expected");
     assert_eq!(*direction, Direction::ToClient);
     assert_eq!(stats.frames, 1);
     assert_eq!(stats.empty_skipped, 1);
     assert_eq!(stats.crlf, 1);
 }
 
-// --- Panne du point de décision ---
+// --- Decision point failure ---
 
 #[tokio::test]
-async fn un_point_de_decision_en_panne_laisse_passer() {
-    // Règle de disponibilité §4 appliquée à notre propre code : si le daemon
-    // est tombé, on ne casse pas la session de l'agent.
+async fn a_broken_decision_point_lets_traffic_through() {
+    // The availability rule of §4 applied to our own code: if the daemon is
+    // down, we do not break the agent's session.
     let input = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{}}\n";
     let obs = Arc::new(Recorder::default());
     let mut out = Vec::new();
@@ -434,22 +428,22 @@ async fn un_point_de_decision_en_panne_laisse_passer() {
     )
     .run(&input[..], &mut out, None)
     .await
-    .expect("relais");
+    .expect("relay");
 
-    assert_eq!(out, input, "le trafic doit passer malgré la panne");
+    assert_eq!(out, input, "traffic must go through despite the failure");
     assert!(
         obs.anomalies()
             .iter()
             .any(|a| a.contains("DecisionUnavailable")),
-        "l'incident doit être signalé : {:?}",
+        "the incident must be reported: {:?}",
         obs.anomalies()
     );
 }
 
 #[tokio::test]
-async fn fail_closed_bloque_quand_la_politique_le_demande() {
-    // L'utilisateur qui a explicitement demandé fail_closed obtient un blocage,
-    // pas un passage silencieux.
+async fn fail_closed_blocks_when_the_policy_asks_for_it() {
+    // A user who explicitly asked for fail_closed gets a block, not a silent
+    // pass-through.
     let input = b"{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"tools/call\",\"params\":{}}\n";
     let (tx, mut rx) = mpsc::unbounded_channel();
     let obs = Arc::new(Recorder::default());
@@ -464,10 +458,10 @@ async fn fail_closed_bloque_quand_la_politique_le_demande() {
     }
     .run(&input[..], &mut out, None)
     .await
-    .expect("relais");
+    .expect("relay");
 
-    assert!(out.is_empty(), "rien ne doit atteindre l'amont");
-    let payload = rx.recv().await.expect("réponse de blocage attendue");
+    assert!(out.is_empty(), "nothing may reach the upstream");
+    let payload = rx.recv().await.expect("a block response is expected");
     let v: serde_json::Value = serde_json::from_slice(payload.trim_ascii_end()).expect("json");
     assert_eq!(v["result"]["isError"], true);
     assert!(

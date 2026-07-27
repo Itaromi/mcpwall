@@ -1,16 +1,15 @@
-//! `mcpwall init` et `mcpwall restore`.
+//! `mcpwall init` and `mcpwall restore`.
 //!
-//! L'onboarding est l'endroit où ce produit se gagne ou se perd. Trois règles
-//! en découlent :
+//! Onboarding is where this product is won or lost. Three rules follow:
 //!
-//! 1. **Rien n'est écrit sans que le diff ait été montré.** Réécrire en silence
-//!    la configuration d'un outil de travail est le meilleur moyen de perdre la
-//!    confiance de quelqu'un du premier coup.
-//! 2. **Toute écriture est réversible en une commande.** Chaque fichier touché
-//!    est sauvegardé en `.bak.<timestamp>`, et `restore` les remet.
-//! 3. **Les configurations pointent vers un lien symbolique stable**, jamais
-//!    vers le chemin du bundle : déplacer l'app casserait sinon tous les
-//!    serveurs MCP de l'utilisateur.
+//! 1. **Nothing is written before the diff has been shown.** Silently
+//!    rewriting the configuration of someone's working tool is the surest way
+//!    to lose their trust on the first try.
+//! 2. **Every write is reversible with one command.** Each file touched is
+//!    backed up as `.bak.<timestamp>`, and `restore` puts them back.
+//! 3. **Configurations point at a stable symlink**, never at the bundle path:
+//!    otherwise moving the app would break every one of the user's MCP
+//!    servers.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -20,36 +19,36 @@ use serde_json::{Map, Value};
 
 use crate::journal::home_dir;
 
-/// Emplacement stable du binaire, vers lequel pointent toutes les configs.
+/// Stable location of the binary, which every config points at.
 pub fn shim_link() -> PathBuf {
     home_dir().join(".mcpwall").join("bin").join("mcpwall")
 }
 
-/// Crée ou rafraîchit le lien symbolique vers le binaire courant.
+/// Creates or refreshes the symlink to the current binary.
 ///
-/// Appelé au premier lancement de l'app et par `init`. Le lien est refait à
-/// chaque fois : c'est ce qui permet de déplacer l'app sans rien casser.
+/// Called on the app's first launch and by `init`. The link is remade every
+/// time: that is what lets the app be moved without breaking anything.
 pub fn ensure_shim_link(target: &Path) -> Result<PathBuf> {
     let link = shim_link();
     if let Some(parent) = link.parent() {
         std::fs::create_dir_all(parent)
-            .with_context(|| format!("création de {}", parent.display()))?;
+            .with_context(|| format!("creating {}", parent.display()))?;
     }
     let _ = std::fs::remove_file(&link);
 
     #[cfg(unix)]
     std::os::unix::fs::symlink(target, &link)
-        .with_context(|| format!("lien {} -> {}", link.display(), target.display()))?;
+        .with_context(|| format!("linking {} -> {}", link.display(), target.display()))?;
 
     Ok(link)
 }
 
-/// Un fichier de configuration client qu'on sait manipuler.
+/// A client configuration file we know how to handle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
-    /// `~/.claude.json` — serveurs globaux et par projet.
+    /// `~/.claude.json` — global and per-project servers.
     ClaudeGlobal,
-    /// `.mcp.json` d'un projet.
+    /// A project's `.mcp.json`.
     ProjectMcp,
     /// `~/.cursor/mcp.json`.
     Cursor,
@@ -59,7 +58,7 @@ impl Kind {
     pub fn label(self) -> &'static str {
         match self {
             Self::ClaudeGlobal => "Claude Code (global)",
-            Self::ProjectMcp => "projet",
+            Self::ProjectMcp => "project",
             Self::Cursor => "Cursor",
         }
     }
@@ -69,16 +68,16 @@ impl Kind {
 pub struct Target {
     pub path: PathBuf,
     pub kind: Kind,
-    /// Projet auquel rattacher les serveurs de ce fichier.
+    /// Project the servers in this file belong to.
     ///
-    /// Renseigné pour un `.mcp.json` — le fichier vit dans le projet, donc on
-    /// sait de quoi il s'agit. **Vide pour les fichiers globaux** : un serveur
-    /// déclaré dans `~/.claude.json` est utilisé depuis n'importe quel projet,
-    /// et lui coller un `--project` serait mentir sur la provenance.
+    /// Filled in for a `.mcp.json` — the file lives inside the project, so we
+    /// know which one it is. **Empty for global files**: a server declared in
+    /// `~/.claude.json` is used from any project, and pinning a `--project` on
+    /// it would be lying about the provenance.
     pub project: Option<PathBuf>,
 }
 
-/// Découvre les configurations existantes.
+/// Discovers the existing configurations.
 pub fn discover(extra_projects: &[PathBuf]) -> Vec<Target> {
     let mut out = Vec::new();
     let home = home_dir();
@@ -118,7 +117,7 @@ pub fn discover(extra_projects: &[PathBuf]) -> Vec<Target> {
     out
 }
 
-/// Ce qu'`init` ferait à un fichier.
+/// What `init` would do to a file.
 #[derive(Debug)]
 pub struct Plan {
     pub path: PathBuf,
@@ -135,25 +134,25 @@ impl Plan {
     }
 }
 
-/// Calcule la réécriture, sans rien écrire.
+/// Computes the rewrite, without writing anything.
 pub fn plan(target: &Target, shim: &Path) -> Result<Plan> {
     let before = std::fs::read_to_string(&target.path)
-        .with_context(|| format!("lecture de {}", target.path.display()))?;
+        .with_context(|| format!("reading {}", target.path.display()))?;
     let mut doc: Value = serde_json::from_str(&before)
-        .with_context(|| format!("{} n'est pas du JSON valide", target.path.display()))?;
+        .with_context(|| format!("{} is not valid JSON", target.path.display()))?;
 
     let mut wrapped = Vec::new();
     let mut already = Vec::new();
 
-    // `~/.claude.json` porte des serveurs à la racine *et* par projet. Les deux
-    // emplacements sont traités successivement plutôt que collectés : deux
-    // emprunts mutables simultanés sur le même document n'existeraient que pour
-    // la commodité d'une boucle unique.
+    // `~/.claude.json` carries servers at the root *and* per project. The two
+    // locations are handled one after the other rather than collected: two
+    // simultaneous mutable borrows on the same document would exist only for
+    // the convenience of a single loop.
     //
-    // La distinction compte pour le scope : sous `projects.<dir>`, on sait de
-    // quel projet il s'agit et on peut injecter `--project` (rang 1). À la
-    // racine, on ne sait pas — ce serveur est utilisé depuis n'importe où — et
-    // lui inventer un projet serait mentir sur la provenance.
+    // The distinction matters for the scope: under `projects.<dir>` we know
+    // which project it is and can inject `--project` (rank 1). At the root we
+    // do not — that server is used from anywhere — and inventing a project for
+    // it would be lying about the provenance.
     if let Some(projects) = doc.get_mut("projects").and_then(Value::as_object_mut) {
         for (dir, entry) in projects.iter_mut() {
             let project = PathBuf::from(dir);
@@ -198,15 +197,15 @@ enum WrapResult {
     Skipped,
 }
 
-/// Enveloppe une entrée de serveur, en conservant `env`, `args` et le reste à
-/// l'identique.
+/// Wraps a server entry, preserving `env`, `args` and everything else
+/// verbatim.
 fn wrap_entry(cfg: &mut Value, shim: &Path, project: Option<&Path>) -> WrapResult {
     let Some(obj) = cfg.as_object_mut() else {
         return WrapResult::Skipped;
     };
 
-    // Les serveurs HTTP/SSE n'ont pas de commande à envelopper : le transport
-    // HTTP arrive en M3.
+    // HTTP/SSE servers have no command to wrap: the HTTP transport lands in
+    // M3.
     let Some(command) = obj
         .get("command")
         .and_then(Value::as_str)
@@ -235,9 +234,9 @@ fn wrap_entry(cfg: &mut Value, shim: &Path, project: Option<&Path>) -> WrapResul
     new_args.push(Value::String(command.clone()));
     new_args.extend(old_args.iter().cloned());
 
-    // Trace de la commande d'origine : `restore` s'appuie sur les sauvegardes,
-    // mais un humain qui lit le fichier doit pouvoir comprendre ce qui a été
-    // fait sans les chercher.
+    // A record of the original command: `restore` relies on the backups, but a
+    // human reading the file must be able to understand what was done without
+    // going to look for them.
     obj.insert(
         "x-mcpwall-original".into(),
         Value::Object(Map::from_iter([
@@ -251,13 +250,13 @@ fn wrap_entry(cfg: &mut Value, shim: &Path, project: Option<&Path>) -> WrapResul
     WrapResult::Wrapped
 }
 
-/// Sauvegarde puis écrit.
+/// Backs up, then writes.
 pub fn apply(plan: &Plan) -> Result<PathBuf> {
     let backup = backup_path(&plan.path);
     std::fs::copy(&plan.path, &backup)
-        .with_context(|| format!("sauvegarde vers {}", backup.display()))?;
+        .with_context(|| format!("backing up to {}", backup.display()))?;
     std::fs::write(&plan.path, &plan.after)
-        .with_context(|| format!("écriture de {}", plan.path.display()))?;
+        .with_context(|| format!("writing {}", plan.path.display()))?;
     Ok(backup)
 }
 
@@ -271,7 +270,7 @@ fn backup_path(path: &Path) -> PathBuf {
     PathBuf::from(p)
 }
 
-/// Sauvegardes disponibles, la plus récente en premier pour chaque fichier.
+/// Available backups, most recent first for each file.
 pub fn backups() -> BTreeMap<PathBuf, Vec<PathBuf>> {
     let mut out: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
     let home = home_dir();
@@ -297,12 +296,12 @@ pub fn backups() -> BTreeMap<PathBuf, Vec<PathBuf>> {
 
     for v in out.values_mut() {
         v.sort();
-        v.reverse(); // la plus récente d'abord
+        v.reverse(); // most recent first
     }
     out
 }
 
-/// Restaure chaque fichier depuis sa sauvegarde la plus récente.
+/// Restores each file from its most recent backup.
 pub fn restore() -> Result<Vec<PathBuf>> {
     let mut restored = Vec::new();
     for (original, saves) in backups() {
@@ -310,13 +309,13 @@ pub fn restore() -> Result<Vec<PathBuf>> {
             continue;
         };
         std::fs::copy(latest, &original)
-            .with_context(|| format!("restauration de {}", original.display()))?;
+            .with_context(|| format!("restoring {}", original.display()))?;
         restored.push(original);
     }
     Ok(restored)
 }
 
-/// Diff unifié minimal, suffisant pour être lu avant d'accepter.
+/// Minimal unified diff, enough to be read before accepting.
 pub fn diff(before: &str, after: &str) -> String {
     let a: Vec<&str> = before.lines().collect();
     let b: Vec<&str> = after.lines().collect();
@@ -331,8 +330,8 @@ pub fn diff(before: &str, after: &str) -> String {
             j += 1;
             continue;
         }
-        // Cherche la prochaine resynchronisation. Fenêtre bornée : on affiche
-        // un diff lisible, on n'implémente pas Myers.
+        // Look for the next resynchronisation. Bounded window: we display a
+        // readable diff, we are not implementing Myers.
         let mut resync = None;
         'outer: for da in 0..40usize {
             for db in 0..40usize {

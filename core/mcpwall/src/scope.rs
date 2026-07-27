@@ -1,59 +1,59 @@
-//! Résolution du projet auquel rattacher une session.
+//! Resolving which project a session belongs to.
 //!
-//! Le scoping par projet n'est pas un confort d'affichage : c'est lui qui
-//! empêche un « toujours autoriser » accordé dans un dépôt de s'appliquer à un
-//! autre. Un scope faux est une fuite de permission silencieuse. D'où deux
-//! principes tenus dans tout ce module :
+//! Per-project scoping is not a display convenience: it is what stops an
+//! "always allow" granted in one repository from applying to another. A wrong
+//! scope is a silent permission leak. Hence two principles held throughout this
+//! module:
 //!
-//! 1. **On ne devine jamais.** L'absence de signal donne [`ScopeSource::Unknown`],
-//!    pas une valeur plausible.
-//! 2. **La provenance voyage avec la valeur.** [`Scope`] transporte toujours son
-//!    [`ScopeSource`], parce que la portée `forever` n'est offerte qu'aux
-//!    provenances fiables — voir [`Scope::allows_forever`].
+//! 1. **We never guess.** No signal yields [`ScopeSource::Unknown`], not a
+//!    plausible value.
+//! 2. **Provenance travels with the value.** [`Scope`] always carries its
+//!    [`ScopeSource`], because the `forever` scope is only offered for
+//!    trustworthy provenances — see [`Scope::allows_forever`].
 //!
-//! Deux couches, séparées exprès : la résolution de précédence est pure et
-//! testable sans système de fichiers ; la canonicalisation, qui touche le
-//! disque, tient dans [`canonicalize_for_scope`].
+//! Two layers, deliberately separated: precedence resolution is pure and
+//! testable without a filesystem; canonicalisation, which touches the disk,
+//! lives in [`canonicalize_for_scope`].
 
 use std::path::{Path, PathBuf};
 
-/// Séparateur interne des chemins dans une clé de scope.
+/// Internal separator for paths inside a scope key.
 ///
-/// `\u{1f}` (unit separator) n'apparaît pas dans un chemin réel. Pour le cas
-/// courant — une seule racine — la clé se lit exactement comme dans la spec :
-/// `project:/Users/marc/monrepo`.
+/// `\u{1f}` (unit separator) does not occur in a real path. For the common case
+/// — a single root — the key reads exactly as it does in the spec:
+/// `project:/Users/marc/myrepo`.
 const KEY_SEP: char = '\u{1f}';
 
 // ---------------------------------------------------------------------------
 // Provenance
 // ---------------------------------------------------------------------------
 
-/// D'où vient le chemin de projet, par ordre de fiabilité décroissante.
+/// Where the project path came from, in decreasing order of trustworthiness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ScopeSource {
-    /// 1 — `--project` écrit par `mcpwall init` dans la commande enveloppée.
+    /// 1 — `--project`, written by `mcpwall init` into the wrapped command.
     ///
-    /// Le signal le plus fort : au moment où `init` réécrit `~/monrepo/.mcp.json`,
-    /// il sait de quel projet il s'agit. Déterministe, identique sur tous les
-    /// clients, indépendant du protocole.
+    /// The strongest signal: at the moment `init` rewrites
+    /// `~/myrepo/.mcp.json`, it knows which project this is. Deterministic,
+    /// identical across clients, independent of the protocol.
     Injected,
-    /// 2 — racines observées passivement dans une réponse à `roots/list`.
+    /// 2 — roots observed passively in a response to `roots/list`.
     ///
-    /// Sémantiquement juste, mais optionnel : le shim ne reçoit rien, il voit
-    /// passer — et seulement si un serveur amont pense à demander.
+    /// Semantically correct, but optional: the shim is not told anything, it
+    /// happens to see it go by — and only if an upstream server thinks to ask.
     Roots,
-    /// 3 — répertoire de travail hérité, canonicalisé.
+    /// 3 — inherited working directory, canonicalised.
     ///
-    /// Sa sémantique change selon le client : correct depuis Claude Code, sans
-    /// rapport avec un projet depuis Claude Desktop. Utilisable pour regrouper
-    /// et afficher, pas pour accorder une permission permanente.
+    /// Its meaning varies by client: correct from Claude Code, unrelated to any
+    /// project from Claude Desktop. Usable for grouping and display, not for
+    /// granting a permanent permission.
     Cwd,
-    /// 4 — aucun signal. Sentinelle explicite.
+    /// 4 — no signal at all. An explicit sentinel.
     Unknown,
 }
 
 impl ScopeSource {
-    /// Rang de précédence, 1 étant le plus fiable.
+    /// Precedence rank, 1 being the most trustworthy.
     pub fn rank(self) -> u8 {
         match self {
             Self::Injected => 1,
@@ -63,8 +63,8 @@ impl ScopeSource {
         }
     }
 
-    /// Étiquette stable pour le journal et les overrides. Ne jamais la changer
-    /// sans migration : elle est persistée.
+    /// Stable label for the journal and for overrides. Never change it without
+    /// a migration: it is persisted.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Injected => "injected",
@@ -85,20 +85,20 @@ impl std::fmt::Display for ScopeSource {
 // Scope
 // ---------------------------------------------------------------------------
 
-/// Un projet résolu, avec sa provenance.
+/// A resolved project, with its provenance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scope {
     source: ScopeSource,
-    /// Trié et dédupliqué. Un monorepo peut légitimement exposer plusieurs
-    /// racines ; le scope est l'ensemble, pas la première.
+    /// Sorted and deduplicated. A monorepo may legitimately expose several
+    /// roots; the scope is the set, not the first one.
     paths: Vec<PathBuf>,
 }
 
 impl Scope {
-    /// Construit un scope à partir de chemins **déjà canonicalisés**.
+    /// Builds a scope from **already canonicalised** paths.
     ///
-    /// Rend [`Scope::unknown`] si la liste est vide après normalisation : une
-    /// provenance sans chemin n'est pas une provenance.
+    /// Returns [`Scope::unknown`] if the list is empty after normalisation: a
+    /// provenance with no path is not a provenance.
     pub fn new(source: ScopeSource, paths: impl IntoIterator<Item = PathBuf>) -> Self {
         let mut paths: Vec<PathBuf> = paths.into_iter().collect();
         paths.sort();
@@ -125,13 +125,13 @@ impl Scope {
         &self.paths
     }
 
-    /// Clé de scoping persistée dans le journal et les overrides.
+    /// Scoping key persisted in the journal and in overrides.
     ///
-    /// Deux scopes de provenances différentes mais de mêmes chemins donnent la
-    /// même clé : c'est voulu. Une session qui démarre en `cwd` puis se voit
-    /// confirmer par `roots` doit retomber sur les mêmes règles, pas en créer un
-    /// jeu parallèle. La provenance est stockée à côté, pour la décision
-    /// `forever`, pas dans la clé.
+    /// Two scopes with different provenances but the same paths produce the
+    /// same key: that is deliberate. A session that starts on `cwd` and is
+    /// later confirmed by `roots` must land on the same rules, not create a
+    /// parallel set. The provenance is stored alongside, for the `forever`
+    /// decision, not inside the key.
     pub fn key(&self) -> String {
         if self.paths.is_empty() {
             return "unknown".to_owned();
@@ -144,10 +144,10 @@ impl Scope {
         format!("project:{}", joined.join(&KEY_SEP.to_string()))
     }
 
-    /// Rendu lisible pour l'UI et `mcpwall log`.
+    /// Human-readable rendering for the UI and `mcpwall log`.
     pub fn display(&self) -> String {
         if self.paths.is_empty() {
-            return "projet inconnu".to_owned();
+            return "unknown project".to_owned();
         }
         let joined: Vec<String> = self
             .paths
@@ -157,29 +157,29 @@ impl Scope {
         joined.join(", ")
     }
 
-    /// La portée `forever` est-elle offrable pour ce scope ?
+    /// Is the `forever` scope offerable for this scope?
     ///
-    /// Seulement en provenance [`Injected`](ScopeSource::Injected) ou
-    /// [`Roots`](ScopeSource::Roots). En `cwd`, la sémantique du chemin dépend
-    /// du client qui a lancé le shim ; accorder une permission permanente sur
-    /// cette base la ferait fuir vers d'autres projets. L'UI n'offre alors que
-    /// `once` et `session`.
+    /// Only for [`Injected`](ScopeSource::Injected) or
+    /// [`Roots`](ScopeSource::Roots) provenance. Under `cwd`, the meaning of
+    /// the path depends on the client that started the shim; granting a
+    /// permanent permission on that basis would let it leak into other
+    /// projects. The UI then offers only `once` and `session`.
     pub fn allows_forever(&self) -> bool {
         matches!(self.source, ScopeSource::Injected | ScopeSource::Roots)
     }
 }
 
 // ---------------------------------------------------------------------------
-// Chaîne de précédence
+// Precedence chain
 // ---------------------------------------------------------------------------
 
-/// Accumule les signaux de scope et rend le meilleur disponible.
+/// Accumulates scope signals and yields the best one available.
 ///
-/// Les signaux n'arrivent pas en même temps : `--project` et le cwd sont connus
-/// au démarrage, les racines seulement si un serveur amont demande `roots/list`
-/// en cours de session. Le scope peut donc **monter** en fiabilité en cours de
-/// route. Chaque entrée de journal fige la provenance du moment ; on ne réécrit
-/// pas le passé.
+/// The signals do not arrive together: `--project` and the cwd are known at
+/// startup, the roots only if an upstream server asks for `roots/list` during
+/// the session. The scope can therefore **rise** in trustworthiness along the
+/// way. Each journal entry freezes the provenance of the moment; we do not
+/// rewrite the past.
 #[derive(Debug, Default, Clone)]
 pub struct ScopeResolver {
     injected: Option<PathBuf>,
@@ -192,26 +192,26 @@ impl ScopeResolver {
         Self::default()
     }
 
-    /// Maillon 1. Chemin déjà canonicalisé.
+    /// Link 1. Path already canonicalised.
     pub fn set_injected(&mut self, path: PathBuf) {
         self.injected = Some(path);
     }
 
-    /// Maillon 3. Chemin déjà canonicalisé.
+    /// Link 3. Path already canonicalised.
     pub fn set_cwd(&mut self, path: PathBuf) {
         self.cwd = Some(path);
     }
 
-    /// Maillon 2. **Remplace** l'ensemble courant.
+    /// Link 2. **Replaces** the current set.
     ///
-    /// `notifications/roots/list_changed` signifie que la liste précédente n'est
-    /// plus valide. Fusionner ferait grossir le scope indéfiniment et lui ferait
-    /// couvrir des répertoires que le client n'expose plus.
+    /// `notifications/roots/list_changed` means the previous list is no longer
+    /// valid. Merging would grow the scope indefinitely and make it cover
+    /// directories the client no longer exposes.
     pub fn observe_roots(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
         self.roots = paths.into_iter().collect();
     }
 
-    /// Rend le meilleur scope disponible.
+    /// Yields the best scope available.
     pub fn resolve(&self) -> Scope {
         if let Some(p) = &self.injected {
             return Scope::new(ScopeSource::Injected, [p.clone()]);
@@ -227,36 +227,36 @@ impl ScopeResolver {
 }
 
 // ---------------------------------------------------------------------------
-// URI de racine
+// Root URIs
 // ---------------------------------------------------------------------------
 
-/// Convertit l'`uri` d'une racine MCP en chemin.
+/// Converts an MCP root's `uri` into a path.
 ///
-/// La spec (révision 2025-11-25, `client/roots`) : « This **MUST** be a `file://`
-/// URI in the current specification ». Tout autre schéma est ignoré plutôt que
-/// rapproché de force d'un chemin — une racine qu'on ne comprend pas ne doit pas
-/// devenir une clé de permission.
+/// The spec (revision 2025-11-25, `client/roots`): "This **MUST** be a
+/// `file://` URI in the current specification". Any other scheme is ignored
+/// rather than forced into resembling a path — a root we do not understand must
+/// never become a permission key.
 ///
-/// Le chemin rendu n'est pas canonicalisé : c'est [`canonicalize_for_scope`] qui
-/// s'en charge, pour garder cette fonction pure.
+/// The returned path is not canonicalised: [`canonicalize_for_scope`] handles
+/// that, so this function stays pure.
 pub fn parse_root_uri(uri: &str) -> Option<PathBuf> {
     let rest = uri.strip_prefix("file://").or_else(|| {
-        // Le schéma est insensible à la casse.
+        // The scheme is case-insensitive.
         let (scheme, rest) = uri.split_once("://")?;
         scheme.eq_ignore_ascii_case("file").then_some(rest)
     })?;
 
-    // On coupe requête et fragment : ils n'ont pas de sens pour un chemin.
+    // Strip query and fragment: they mean nothing for a path.
     let rest = rest.split(['?', '#']).next().unwrap_or(rest);
 
-    // `file:///chemin` (autorité vide) ou `file://localhost/chemin`.
+    // `file:///path` (empty authority) or `file://localhost/path`.
     let path = if let Some(p) = rest.strip_prefix('/') {
-        // L'autorité était vide : `rest` commence directement par le chemin.
+        // The authority was empty: `rest` starts with the path itself.
         format!("/{p}")
     } else {
         let (authority, p) = rest.split_once('/')?;
         if !authority.eq_ignore_ascii_case("localhost") {
-            // Une racine sur un hôte distant n'est pas un chemin local.
+            // A root on a remote host is not a local path.
             return None;
         }
         format!("/{p}")
@@ -269,16 +269,16 @@ pub fn parse_root_uri(uri: &str) -> Option<PathBuf> {
         return None;
     }
 
-    // Une barre finale ne change pas le répertoire désigné, mais changerait la
-    // clé de scope. On normalise, sans toucher à la racine `/`.
+    // A trailing slash does not change the directory being named, but it would
+    // change the scope key. We normalise, leaving the root `/` alone.
     let trimmed = decoded.trim_end_matches('/');
     let path = if trimmed.is_empty() { "/" } else { trimmed };
 
     Some(PathBuf::from(path))
 }
 
-/// Décode les séquences `%XX`. Rend `None` si l'une d'elles est malformée —
-/// on préfère ignorer une racine à en fabriquer un chemin approximatif.
+/// Decodes `%XX` sequences. Returns `None` if one of them is malformed — we
+/// would rather ignore a root than manufacture an approximate path from it.
 fn percent_decode(s: &str) -> Option<Vec<u8>> {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -300,19 +300,19 @@ fn percent_decode(s: &str) -> Option<Vec<u8>> {
 }
 
 // ---------------------------------------------------------------------------
-// Couche disque
+// Disk layer
 // ---------------------------------------------------------------------------
 
-/// Canonicalise un chemin destiné à devenir une clé de scope.
+/// Canonicalises a path destined to become a scope key.
 ///
-/// Résout liens symboliques et `..`. Sans ça, `/tmp` et `/private/tmp` sur macOS
-/// donnent deux clés distinctes pour le même répertoire, et les overrides d'une
-/// session ne se retrouvent pas à la suivante.
+/// Resolves symlinks and `..`. Without it, `/tmp` and `/private/tmp` on macOS
+/// give two distinct keys for the same directory, and one session's overrides
+/// are not found again by the next.
 ///
-/// En cas d'échec — chemin inexistant, permission refusée — on rend le chemin
-/// d'origine tel quel. Perdre la canonicalisation dégrade la qualité du
-/// regroupement ; refuser de démarrer casserait la session de l'agent, ce qui
-/// est le mauvais côté de l'arbitrage.
+/// On failure — non-existent path, permission denied — we return the original
+/// path as-is. Losing canonicalisation degrades the quality of grouping;
+/// refusing to start would break the agent's session, which is the wrong side
+/// of that trade.
 pub fn canonicalize_for_scope(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }

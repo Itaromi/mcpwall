@@ -1,9 +1,8 @@
-//! Tests de l'onboarding.
+//! Onboarding tests.
 //!
-//! Ce module réécrit les fichiers de configuration d'outils dont les gens se
-//! servent pour travailler. Une erreur ici ne provoque pas un bug, elle
-//! provoque une désinstallation. Les tests portent donc autant sur ce qui est
-//! **préservé** que sur ce qui est modifié.
+//! This module rewrites the configuration files of tools people rely on to do
+//! their work. A mistake here does not cause a bug, it causes an uninstall. The
+//! tests therefore cover what is **preserved** as much as what is changed.
 
 use std::path::{Path, PathBuf};
 
@@ -13,13 +12,13 @@ use serde_json::{Value, json};
 fn tmpdir(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("mcpwall-setup-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).expect("répertoire");
+    std::fs::create_dir_all(&d).expect("directory");
     d
 }
 
 fn write_config(dir: &Path, name: &str, v: &Value) -> PathBuf {
     let p = dir.join(name);
-    std::fs::write(&p, serde_json::to_string_pretty(v).expect("json")).expect("écriture");
+    std::fs::write(&p, serde_json::to_string_pretty(v).expect("json")).expect("write");
     p
 }
 
@@ -40,15 +39,15 @@ fn plan_for(path: &Path, kind: Kind, project: Option<PathBuf>) -> Plan {
 }
 
 fn parsed(plan: &Plan) -> Value {
-    serde_json::from_str(&plan.after).expect("le résultat doit rester du JSON valide")
+    serde_json::from_str(&plan.after).expect("the result must stay valid JSON")
 }
 
-// --- Ce qui doit être préservé ---
+// --- What must be preserved ---
 
 #[test]
-fn env_et_args_sont_conserves_a_lidentique() {
-    // Perdre une variable d'environnement casse silencieusement un serveur, et
-    // l'utilisateur accusera mcpwall — à juste titre.
+fn env_and_args_are_kept_verbatim() {
+    // Losing an environment variable silently breaks a server, and the user
+    // will blame mcpwall — rightly.
     let dir = tmpdir("preserve");
     let cfg = json!({
         "mcpServers": {
@@ -65,23 +64,23 @@ fn env_et_args_sont_conserves_a_lidentique() {
     let p = plan_for(
         &path,
         Kind::ProjectMcp,
-        Some(PathBuf::from("/Users/x/projet")),
+        Some(PathBuf::from("/Users/x/project")),
     );
     let after = parsed(&p);
     let entry = &after["mcpServers"]["postgres"];
 
-    assert_eq!(entry["env"]["PGPASSWORD"], "secret", "env perdu");
+    assert_eq!(entry["env"]["PGPASSWORD"], "secret", "env lost");
     assert_eq!(entry["env"]["NODE_ENV"], "production");
-    assert_eq!(entry["disabled"], false, "champ inconnu perdu");
+    assert_eq!(entry["disabled"], false, "unknown field lost");
 
-    // La commande d'origine et ses arguments se retrouvent après `--`.
+    // The original command and its arguments appear after `--`.
     let args: Vec<&str> = entry["args"]
         .as_array()
         .expect("args")
         .iter()
         .filter_map(Value::as_str)
         .collect();
-    let sep = args.iter().position(|a| *a == "--").expect("séparateur --");
+    let sep = args.iter().position(|a| *a == "--").expect("-- separator");
     assert_eq!(args[sep + 1], "npx");
     assert_eq!(
         &args[sep + 2..],
@@ -96,10 +95,10 @@ fn env_et_args_sont_conserves_a_lidentique() {
 }
 
 #[test]
-fn la_commande_pointe_vers_le_lien_et_non_vers_le_bundle() {
-    // Si les configs pointaient vers le chemin du bundle, déplacer l'app
-    // casserait tous les serveurs MCP de l'utilisateur.
-    let dir = tmpdir("lien");
+fn the_command_points_at_the_link_not_at_the_bundle() {
+    // If configs pointed at the bundle path, moving the app would break every
+    // one of the user's MCP servers.
+    let dir = tmpdir("link");
     let path = write_config(
         &dir,
         ".mcp.json",
@@ -116,9 +115,9 @@ fn la_commande_pointe_vers_le_lien_et_non_vers_le_bundle() {
 }
 
 #[test]
-fn la_commande_dorigine_reste_lisible_dans_le_fichier() {
-    // `restore` s'appuie sur les sauvegardes, mais un humain qui ouvre le
-    // fichier doit pouvoir comprendre ce qui a été fait sans les chercher.
+fn the_original_command_stays_readable_in_the_file() {
+    // `restore` relies on the backups, but a human opening the file must be
+    // able to understand what was done without going to look for them.
     let dir = tmpdir("trace");
     let path = write_config(
         &dir,
@@ -135,13 +134,13 @@ fn la_commande_dorigine_reste_lisible_dans_le_fichier() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// --- L'injection de --project ---
+// --- Injecting --project ---
 
 #[test]
-fn un_mcp_json_de_projet_recoit_son_project() {
-    // Maillon 1 de la chaîne de provenance : le fichier vit dans le projet,
-    // donc `init` sait de quel projet il s'agit.
-    let dir = tmpdir("projet");
+fn a_project_mcp_json_receives_its_project() {
+    // Link 1 of the provenance chain: the file lives inside the project, so
+    // `init` knows which project it is.
+    let dir = tmpdir("project");
     let path = write_config(
         &dir,
         ".mcp.json",
@@ -151,7 +150,7 @@ fn un_mcp_json_de_projet_recoit_son_project() {
     let p = plan_for(
         &path,
         Kind::ProjectMcp,
-        Some(PathBuf::from("/Users/x/monrepo")),
+        Some(PathBuf::from("/Users/x/myrepo")),
     );
     let after = parsed(&p);
     let args: Vec<&str> = after["mcpServers"]["fs"]["args"]
@@ -165,16 +164,16 @@ fn un_mcp_json_de_projet_recoit_son_project() {
         .iter()
         .position(|a| *a == "--project")
         .expect("--project");
-    assert_eq!(args[i + 1], "/Users/x/monrepo");
+    assert_eq!(args[i + 1], "/Users/x/myrepo");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn un_serveur_global_ne_recoit_pas_de_project() {
-    // Un serveur déclaré à la racine de `~/.claude.json` est utilisé depuis dix
-    // projets différents. Lui coller un `--project` serait mentir sur la
-    // provenance, et cette provenance décide de l'offre du `forever`.
+fn a_global_server_receives_no_project() {
+    // A server declared at the root of `~/.claude.json` is used from ten
+    // different projects. Pinning a `--project` on it would be lying about the
+    // provenance, and that provenance decides whether `forever` is offered.
     let dir = tmpdir("global");
     let path = write_config(
         &dir,
@@ -193,17 +192,17 @@ fn un_serveur_global_ne_recoit_pas_de_project() {
 
     assert!(
         !args.contains(&"--project"),
-        "un serveur global ne doit pas se voir attribuer un projet : {args:?}"
+        "a global server must not be assigned a project: {args:?}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn les_serveurs_par_projet_de_claude_json_recoivent_le_bon_project() {
-    // `~/.claude.json` porte aussi des serveurs sous `projects.<dir>`. Là, le
-    // projet est connu.
-    let dir = tmpdir("par-projet");
+fn per_project_servers_in_claude_json_receive_the_right_project() {
+    // `~/.claude.json` also carries servers under `projects.<dir>`. There, the
+    // project is known.
+    let dir = tmpdir("per-project");
     let path = write_config(
         &dir,
         ".claude.json",
@@ -235,12 +234,12 @@ fn les_serveurs_par_projet_de_claude_json_recoivent_le_bon_project() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// --- Idempotence et cas limites ---
+// --- Idempotence and edge cases ---
 
 #[test]
-fn appliquer_deux_fois_nenveloppe_pas_deux_fois() {
-    // Relancer `init` est un réflexe. Une double enveloppe produirait un shim
-    // qui lance un shim, avec deux journaux et deux fois la latence.
+fn applying_twice_does_not_wrap_twice() {
+    // Re-running `init` is a reflex. Double wrapping would produce a shim
+    // starting a shim, with two journals and twice the latency.
     let dir = tmpdir("idempotent");
     let path = write_config(
         &dir,
@@ -250,12 +249,12 @@ fn appliquer_deux_fois_nenveloppe_pas_deux_fois() {
 
     let first = plan_for(&path, Kind::ProjectMcp, None);
     assert_eq!(first.wrapped, vec!["fs"]);
-    std::fs::write(&path, &first.after).expect("écriture");
+    std::fs::write(&path, &first.after).expect("write");
 
     let second = plan_for(&path, Kind::ProjectMcp, None);
     assert!(
         second.wrapped.is_empty(),
-        "réenveloppé : {:?}",
+        "re-wrapped: {:?}",
         second.wrapped
     );
     assert_eq!(second.already, vec!["fs"]);
@@ -265,9 +264,9 @@ fn appliquer_deux_fois_nenveloppe_pas_deux_fois() {
 }
 
 #[test]
-fn un_serveur_http_est_ignore() {
-    // Pas de `command` à envelopper : le transport HTTP arrive en M3, et on ne
-    // prétend pas le couvrir en attendant.
+fn an_http_server_is_skipped() {
+    // No `command` to wrap: the HTTP transport lands in M3, and we do not
+    // pretend to cover it in the meantime.
     let dir = tmpdir("http");
     let path = write_config(
         &dir,
@@ -286,9 +285,9 @@ fn un_serveur_http_est_ignore() {
 }
 
 #[test]
-fn un_fichier_sans_serveur_ne_produit_aucun_changement() {
-    let dir = tmpdir("vide");
-    let path = write_config(&dir, ".mcp.json", &json!({"autreChose": 1}));
+fn a_file_with_no_server_produces_no_change() {
+    let dir = tmpdir("empty");
+    let path = write_config(&dir, ".mcp.json", &json!({"somethingElse": 1}));
 
     let p = plan_for(&path, Kind::ProjectMcp, None);
     assert!(p.is_noop());
@@ -297,10 +296,10 @@ fn un_fichier_sans_serveur_ne_produit_aucun_changement() {
 }
 
 #[test]
-fn un_json_invalide_est_refuse_sans_ecraser() {
-    let dir = tmpdir("invalide");
+fn invalid_json_is_refused_without_overwriting() {
+    let dir = tmpdir("invalid");
     let path = dir.join(".mcp.json");
-    std::fs::write(&path, "{ ceci n'est pas du json").expect("écriture");
+    std::fs::write(&path, "{ this is not json").expect("write");
 
     let r = plan(
         &Target {
@@ -310,24 +309,21 @@ fn un_json_invalide_est_refuse_sans_ecraser() {
         },
         &shim(),
     );
-    assert!(
-        r.is_err(),
-        "un fichier illisible doit faire échouer le plan"
-    );
+    assert!(r.is_err(), "an unreadable file must make the plan fail");
 
-    // Le fichier est intact.
-    let after = std::fs::read_to_string(&path).expect("lecture");
-    assert_eq!(after, "{ ceci n'est pas du json");
+    // The file is untouched.
+    let after = std::fs::read_to_string(&path).expect("read");
+    assert_eq!(after, "{ this is not json");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// --- Le diff montré avant écriture ---
+// --- The diff shown before writing ---
 
 #[test]
-fn le_diff_montre_ce_qui_change() {
-    // Rien ne doit être écrit sans que l'utilisateur ait pu lire ce qui va lui
-    // arriver.
+fn the_diff_shows_what_changes() {
+    // Nothing may be written without the user having been able to read what is
+    // about to happen to them.
     let dir = tmpdir("diff");
     let path = write_config(
         &dir,
@@ -338,14 +334,14 @@ fn le_diff_montre_ce_qui_change() {
     let p = plan_for(&path, Kind::ProjectMcp, None);
     let d = diff(&p.before, &p.after);
 
-    assert!(d.contains("- "), "aucune ligne retirée : {d}");
-    assert!(d.contains("+ "), "aucune ligne ajoutée : {d}");
-    assert!(d.contains("mcpwall"), "le diff doit montrer le shim : {d}");
+    assert!(d.contains("- "), "no line removed: {d}");
+    assert!(d.contains("+ "), "no line added: {d}");
+    assert!(d.contains("mcpwall"), "the diff must show the shim: {d}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn le_diff_dun_fichier_inchange_est_vide() {
+fn the_diff_of_an_unchanged_file_is_empty() {
     assert!(diff("a\nb\n", "a\nb\n").is_empty());
 }

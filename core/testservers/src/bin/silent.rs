@@ -1,8 +1,8 @@
-//! Serveur qui n'écrit jamais rien.
+//! A server that never writes anything.
 //!
-//! Vérifie que le shim ne reste pas suspendu et n'invente pas de trafic.
+//! Checks that the shim neither hangs nor invents traffic.
 
 fn main() {
     while testservers::read_line().is_some() {}
-    // Sort à la fermeture de stdin, sans avoir rien écrit.
+    // Exits when stdin closes, having written nothing.
 }

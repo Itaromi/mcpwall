@@ -1,9 +1,9 @@
-//! Tests de découpage. Priorité aux frontières de lecture et aux serveurs qui
-//! violent la spec, c'est là que se trouvent les vrais casse-gueule.
+//! Frame splitting tests. Priority to read boundaries and to servers that
+//! violate the spec — that is where the real pitfalls are.
 
 use mcpwall::frame::{FrameError, FrameSplitter};
 
-/// Pousse tout d'un bloc et draine. Rend les *contenus*.
+/// Pushes everything at once and drains. Returns the *contents*.
 fn split_all(input: &[u8], max: usize) -> (Vec<Vec<u8>>, Vec<FrameError>) {
     let mut s = FrameSplitter::new(max);
     s.push(input);
@@ -21,7 +21,7 @@ fn drain(s: &mut FrameSplitter) -> (Vec<Vec<u8>>, Vec<FrameError>) {
     (ok, err)
 }
 
-/// Concatène ce que le relais réémettrait.
+/// Concatenates what the relay would re-emit.
 fn relayed(input: &[u8], max: usize) -> Vec<u8> {
     let mut s = FrameSplitter::new(max);
     s.push(input);
@@ -38,14 +38,14 @@ fn relayed(input: &[u8], max: usize) -> Vec<u8> {
 const MAX: usize = 1024;
 
 #[test]
-fn frames_simples() {
+fn simple_frames() {
     let (frames, errs) = split_all(b"{\"a\":1}\n{\"b\":2}\n", MAX);
     assert_eq!(frames, vec![b"{\"a\":1}".to_vec(), b"{\"b\":2}".to_vec()]);
     assert!(errs.is_empty());
 }
 
 #[test]
-fn frame_incomplete_pas_rendue() {
+fn an_incomplete_frame_is_not_returned() {
     let mut s = FrameSplitter::new(MAX);
     s.push(b"{\"a\":1}");
     assert!(s.next_frame().is_none());
@@ -53,17 +53,20 @@ fn frame_incomplete_pas_rendue() {
     assert_eq!(s.next_frame().unwrap().unwrap().content(), b"{\"a\":1}");
 }
 
-// --- Frontières de lecture ---
+// --- Read boundaries ---
 
 #[test]
-fn une_frame_en_quarante_morceaux() {
+fn one_frame_in_forty_chunks() {
     let msg = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x"}}"#;
     let mut s = FrameSplitter::new(MAX);
 
     let chunk = msg.len().div_ceil(40);
     for piece in msg.chunks(chunk) {
         s.push(piece);
-        assert!(s.next_frame().is_none(), "rien ne doit sortir avant le \\n");
+        assert!(
+            s.next_frame().is_none(),
+            "nothing may come out before the \\n"
+        );
     }
     s.push(b"\n");
 
@@ -73,7 +76,7 @@ fn une_frame_en_quarante_morceaux() {
 }
 
 #[test]
-fn six_frames_dans_un_seul_read() {
+fn six_frames_in_a_single_read() {
     let mut input = Vec::new();
     for i in 0..6 {
         input.extend_from_slice(format!("{{\"id\":{i}}}\n").as_bytes());
@@ -84,9 +87,9 @@ fn six_frames_dans_un_seul_read() {
 }
 
 #[test]
-fn frontiere_au_milieu_dune_sequence_utf8() {
-    // « é » = 0xC3 0xA9, coupé entre les deux octets. Le découpeur ne convertit
-    // jamais en String, donc ça doit passer sans même être remarqué.
+fn a_boundary_in_the_middle_of_a_utf8_sequence() {
+    // "é" = 0xC3 0xA9, cut between the two bytes. The splitter never converts
+    // to String, so this must go through without even being noticed.
     let msg = "{\"text\":\"café ☕\"}".as_bytes().to_vec();
     let cut = msg.iter().position(|&b| b == 0xC3).unwrap() + 1;
 
@@ -100,7 +103,7 @@ fn frontiere_au_milieu_dune_sequence_utf8() {
 }
 
 #[test]
-fn coupure_juste_avant_le_terminateur() {
+fn a_cut_just_before_the_terminator() {
     let mut s = FrameSplitter::new(MAX);
     s.push(b"{\"a\":1}");
     assert!(s.next_frame().is_none());
@@ -110,7 +113,7 @@ fn coupure_juste_avant_le_terminateur() {
 }
 
 #[test]
-fn octets_arrivant_un_par_un() {
+fn bytes_arriving_one_at_a_time() {
     let input = b"{\"a\":1}\n{\"b\":2}\n";
     let mut s = FrameSplitter::new(MAX);
     let mut frames = Vec::new();
@@ -123,10 +126,10 @@ fn octets_arrivant_un_par_un() {
     assert_eq!(frames, vec![b"{\"a\":1}".to_vec(), b"{\"b\":2}".to_vec()]);
 }
 
-// --- Serveurs qui violent la spec ---
+// --- Servers that violate the spec ---
 
 #[test]
-fn lignes_vides_ignorees_et_comptees() {
+fn blank_lines_skipped_and_counted() {
     let (frames, _) = split_all(b"\n\n{\"a\":1}\n\n", MAX);
     assert_eq!(frames, vec![b"{\"a\":1}".to_vec()]);
 
@@ -138,7 +141,7 @@ fn lignes_vides_ignorees_et_comptees() {
 }
 
 #[test]
-fn crlf_tolere_et_compte() {
+fn crlf_tolerated_and_counted() {
     let mut s = FrameSplitter::new(MAX);
     s.push(b"{\"a\":1}\r\n");
     assert_eq!(s.next_frame().unwrap().unwrap().content(), b"{\"a\":1}");
@@ -146,7 +149,7 @@ fn crlf_tolere_et_compte() {
 }
 
 #[test]
-fn frame_non_terminee_en_fin_de_flux() {
+fn an_unterminated_frame_at_end_of_stream() {
     let mut s = FrameSplitter::new(MAX);
     s.push(b"{\"a\":1}\n{\"b\":2}");
     assert_eq!(s.next_frame().unwrap().unwrap().content(), b"{\"a\":1}");
@@ -157,33 +160,33 @@ fn frame_non_terminee_en_fin_de_flux() {
 }
 
 #[test]
-fn finish_sur_flux_propre_ne_rend_rien() {
+fn finish_on_a_clean_stream_returns_nothing() {
     let mut s = FrameSplitter::new(MAX);
     s.push(b"{\"a\":1}\n");
     drain(&mut s);
     assert!(s.finish().is_none());
 }
 
-// --- Plafond de taille ---
+// --- Size ceiling ---
 
 #[test]
-fn oversize_signale_puis_resynchronisation() {
+fn oversize_reported_then_resynchronisation() {
     let mut s = FrameSplitter::new(64);
     s.push(&[b'x'; 200]);
 
     assert_eq!(
         s.next_frame(),
         Some(Err(FrameError::Oversize { limit: 64 })),
-        "l'erreur doit être signalée une fois, pas à chaque push"
+        "the error must be reported once, not on every push"
     );
     assert!(s.next_frame().is_none());
 
-    // Encore des octets de la frame géante : toujours rien, et pas de seconde
-    // erreur pour le même incident.
+    // More bytes from the giant frame: still nothing, and no second error for
+    // the same incident.
     s.push(&[b'x'; 500]);
     assert!(s.next_frame().is_none());
 
-    // Le terminateur clôt la frame rejetée ; la suivante repart intacte.
+    // The terminator closes the rejected frame; the next one starts intact.
     s.push(b"\n{\"a\":1}\n");
     assert_eq!(s.next_frame().unwrap().unwrap().content(), b"{\"a\":1}");
 
@@ -194,23 +197,19 @@ fn oversize_signale_puis_resynchronisation() {
 }
 
 #[test]
-fn oversize_ne_fait_pas_croitre_le_tampon() {
+fn oversize_does_not_grow_the_buffer() {
     let mut s = FrameSplitter::new(1024);
     for _ in 0..64 {
         s.push(&[b'x'; 4096]);
         let _ = s.next_frame();
     }
-    // 256 Ko poussés derrière un plafond de 1 Ko : en mode rejet le tampon doit
-    // rester au ras du dernier push, pas accumuler.
-    assert!(
-        s.buffered() <= 4096,
-        "tampon retenu = {} octets",
-        s.buffered()
-    );
+    // 256 KB pushed behind a 1 KB ceiling: in discard mode the buffer must
+    // stay level with the last push, not accumulate.
+    assert!(s.buffered() <= 4096, "buffered = {} bytes", s.buffered());
 }
 
 #[test]
-fn frame_juste_sous_le_plafond_passe() {
+fn a_frame_just_under_the_ceiling_goes_through() {
     let payload = vec![b'x'; 1024];
     let mut input = payload.clone();
     input.push(b'\n');
@@ -220,7 +219,7 @@ fn frame_juste_sous_le_plafond_passe() {
 }
 
 #[test]
-fn charge_utile_de_plusieurs_megaoctets() {
+fn a_multi_megabyte_payload() {
     let payload = vec![b'z'; 8 * 1024 * 1024];
     let mut s = FrameSplitter::new(32 * 1024 * 1024);
     for piece in payload.chunks(64 * 1024) {
@@ -231,10 +230,10 @@ fn charge_utile_de_plusieurs_megaoctets() {
     assert_eq!(s.next_frame().unwrap().unwrap().len(), payload.len());
 }
 
-// --- Invariant global ---
+// --- Global invariant ---
 
 #[test]
-fn le_decoupage_ne_depend_pas_de_la_taille_des_morceaux() {
+fn splitting_does_not_depend_on_chunk_size() {
     let input: &[u8] = b"{\"a\":1}\n\n{\"b\":\"caf\xc3\xa9\"}\r\n{\"c\":3}\n";
     let reference = split_all(input, MAX).0;
 
@@ -250,31 +249,31 @@ fn le_decoupage_ne_depend_pas_de_la_taille_des_morceaux() {
         if let Some(f) = s.finish() {
             frames.push(f.content().to_vec());
         }
-        assert_eq!(frames, reference, "divergence avec des morceaux de {size}");
+        assert_eq!(frames, reference, "divergence with chunks of {size}");
     }
 }
 
-// --- Fidélité octet à octet du relais ---
+// --- Byte-for-byte fidelity of the relay ---
 
 #[test]
-fn le_relais_reemet_les_octets_recus() {
-    // Le principe : on ne réécrit jamais ce qu'on relaie. Terminateurs compris.
+fn the_relay_re_emits_the_bytes_it_received() {
+    // The principle: we never rewrite what we relay. Terminators included.
     let input: &[u8] = b"{\"a\":1}\n{\"b\":2}\r\n{\"c\":3}\n";
     assert_eq!(relayed(input, MAX), input);
 }
 
 #[test]
-fn crlf_preserve_dans_raw_mais_absent_du_contenu() {
+fn crlf_preserved_in_raw_but_absent_from_content() {
     let mut s = FrameSplitter::new(MAX);
     s.push(b"{\"a\":1}\r\n");
     let f = s.next_frame().unwrap().unwrap();
-    assert_eq!(f.content(), b"{\"a\":1}", "l'inspection ignore le \\r");
-    assert_eq!(f.raw(), b"{\"a\":1}\r\n", "le relais le conserve");
+    assert_eq!(f.content(), b"{\"a\":1}", "inspection ignores the \\r");
+    assert_eq!(f.raw(), b"{\"a\":1}\r\n", "the relay keeps it");
     assert!(f.is_terminated());
 }
 
 #[test]
-fn contenu_est_un_prefixe_de_raw() {
+fn content_is_a_prefix_of_raw() {
     let mut s = FrameSplitter::new(MAX);
     s.push(b"{\"a\":1}\r\n{\"b\":2}\n");
     while let Some(Ok(f)) = s.next_frame() {
@@ -283,9 +282,9 @@ fn contenu_est_un_prefixe_de_raw() {
 }
 
 #[test]
-fn frame_non_terminee_signale_labsence_de_delimiteur() {
-    // Le relais doit savoir qu'il lui manque un `\n` : le pair attend un
-    // message délimité.
+fn an_unterminated_frame_reports_the_missing_delimiter() {
+    // The relay must know it is missing a `\n`: the peer expects a delimited
+    // message.
     let mut s = FrameSplitter::new(MAX);
     s.push(b"{\"a\":1}");
     assert!(s.next_frame().is_none());
@@ -296,27 +295,27 @@ fn frame_non_terminee_signale_labsence_de_delimiteur() {
 }
 
 #[test]
-fn ligne_vide_absente_du_relais() {
-    // Une ligne vide n'est pas un message MCP et la spec interdit à l'amont
-    // d'en écrire sur stdout. On ne la propage pas ; le compteur la retient.
+fn a_blank_line_is_absent_from_the_relay() {
+    // A blank line is not an MCP message and the spec forbids the upstream from
+    // writing one to stdout. We do not propagate it; the counter records it.
     let mut s = FrameSplitter::new(MAX);
     s.push(b"\n{\"a\":1}\n");
     assert_eq!(relayed(b"\n{\"a\":1}\n", MAX), b"{\"a\":1}\n");
 }
 
 #[test]
-fn octets_de_la_frame_surdimensionnee_jamais_relayes() {
-    // Le pair ne doit rien voir de ce qu'on a rejeté.
+fn bytes_from_the_oversized_frame_are_never_relayed() {
+    // The peer must see nothing of what we discarded.
     let mut input = vec![b'x'; 200];
     input.extend_from_slice(b"\n{\"a\":1}\n");
     assert_eq!(relayed(&input, 64), b"{\"a\":1}\n");
 }
 
 #[test]
-fn le_plafond_ne_depend_pas_du_decoupage_des_lectures() {
-    // Le défaut originel : le plafond n'était vérifié que faute de `\n`. Une
-    // frame surdimensionnée arrivant d'un seul read(), terminateur compris,
-    // passait donc au travers.
+fn the_ceiling_does_not_depend_on_how_reads_are_split() {
+    // The original defect: the ceiling was only checked when no `\n` was found.
+    // An oversized frame arriving from a single read(), terminator included,
+    // therefore slipped through.
     let mut input = vec![b'x'; 200];
     input.push(b'\n');
 
@@ -334,17 +333,17 @@ fn le_plafond_ne_depend_pas_du_decoupage_des_lectures() {
         }
         assert!(
             frames.is_empty(),
-            "frame relayée malgré le plafond ({size})"
+            "frame relayed despite the ceiling ({size})"
         );
-        assert_eq!(errs.len(), 1, "une erreur, et une seule ({size})");
+        assert_eq!(errs.len(), 1, "one error, and only one ({size})");
         assert_eq!(s.stats().oversize, 1);
     }
 }
 
 #[test]
-fn plafond_applique_aussi_en_fin_de_flux() {
+fn the_ceiling_applies_at_end_of_stream_too() {
     let mut s = FrameSplitter::new(64);
     s.push(&[b'x'; 200]);
     let _ = s.next_frame();
-    assert!(s.finish().is_none(), "rien ne doit sortir par finish()");
+    assert!(s.finish().is_none(), "nothing may come out of finish()");
 }

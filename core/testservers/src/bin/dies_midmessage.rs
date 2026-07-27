@@ -1,7 +1,7 @@
-//! Serveur qui meurt au milieu d'un message.
+//! A server that dies in the middle of a message.
 //!
-//! Le cas où l'amont écrit un début de frame puis disparaît : le shim doit
-//! sortir proprement, pas attendre la fin d'une frame qui ne viendra jamais.
+//! The case where the upstream writes the start of a frame then disappears: the
+//! shim must exit cleanly rather than wait for a frame that will never end.
 
 use std::io::Write;
 

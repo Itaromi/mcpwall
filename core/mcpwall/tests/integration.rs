@@ -1,26 +1,25 @@
-//! Tests d'intégration sur de vrais processus.
+//! Integration tests against real processes.
 //!
-//! Les défauts de ce module — orphelins, interblocages, descripteurs mal
-//! fermés, codes de sortie perdus — sont précisément ceux qu'aucun test moqué
-//! ne verra jamais. Ici on lance de vrais binaires et on les fait mal se
-//! comporter.
+//! The defects this module targets — orphans, deadlocks, badly closed
+//! descriptors, lost exit codes — are precisely the ones no mocked test will
+//! ever see. Here we start real binaries and make them misbehave.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Le binaire du shim.
+/// The shim binary.
 fn mcpwall() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_mcpwall"))
 }
 
-/// Un serveur factice. Il vit dans le même répertoire de cibles que le shim.
+/// A fake server. It lives in the same target directory as the shim.
 fn server(name: &str) -> PathBuf {
     let mut p = mcpwall();
     p.pop();
     p.push(name);
-    assert!(p.exists(), "serveur factice absent : {}", p.display());
+    assert!(p.exists(), "fake server missing: {}", p.display());
     p
 }
 
@@ -35,7 +34,7 @@ fn db_path(tag: &str) -> PathBuf {
     p
 }
 
-/// Conduit une session complète et rend (sortie, code de sortie).
+/// Drives a complete session and returns (output, exit code).
 fn session(server_name: &str, input: &str, tag: &str) -> (String, i32) {
     let db = db_path(tag);
     let mut child = Command::new(mcpwall())
@@ -47,14 +46,14 @@ fn session(server_name: &str, input: &str, tag: &str) -> (String, i32) {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .expect("lancement du shim");
+        .expect("starting the shim");
 
     if let Some(mut si) = child.stdin.take() {
         let _ = si.write_all(input.as_bytes());
-        // Fermer stdin est le signal d'arrêt normal d'une session MCP stdio.
+        // Closing stdin is the normal shutdown signal of a stdio MCP session.
     }
 
-    let out = child.wait_with_output().expect("attente du shim");
+    let out = child.wait_with_output().expect("waiting for the shim");
     let _ = std::fs::remove_file(&db);
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -64,10 +63,10 @@ fn session(server_name: &str, input: &str, tag: &str) -> (String, i32) {
 
 const INIT: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"T","version":"1"}}}"#;
 
-// --- Session nominale ---
+// --- Nominal session ---
 
 #[test]
-fn session_complete_contre_un_serveur_normal() {
+fn a_complete_session_against_a_normal_server() {
     let input = format!(
         "{INIT}\n\
          {{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}}\n\
@@ -75,88 +74,84 @@ fn session_complete_contre_un_serveur_normal() {
     );
     let (out, code) = session("normal", &input, "normal");
 
-    assert_eq!(code, 0, "le code de sortie de l'amont doit remonter");
+    assert_eq!(code, 0, "the upstream exit code must be propagated");
     assert!(out.contains("\"protocolVersion\":\"2025-11-25\""), "{out}");
     assert!(out.contains("\"name\":\"normal\""), "{out}");
-    assert_eq!(out.lines().count(), 3, "une réponse par requête : {out}");
+    assert_eq!(out.lines().count(), 3, "one response per request: {out}");
 }
 
-// --- Modes de défaillance de l'amont ---
+// --- Upstream failure modes ---
 
 #[test]
-fn un_amont_muet_ne_suspend_pas_le_shim() {
+fn a_silent_upstream_does_not_hang_the_shim() {
     let start = Instant::now();
     let (out, code) = session("silent", &format!("{INIT}\n"), "silent");
 
     assert!(
         start.elapsed() < Duration::from_secs(10),
-        "le shim est resté suspendu {:?}",
+        "the shim hung for {:?}",
         start.elapsed()
     );
-    assert!(out.is_empty(), "rien ne doit être inventé : {out}");
+    assert!(out.is_empty(), "nothing may be invented: {out}");
     assert_eq!(code, 0);
 }
 
 #[test]
-fn un_amont_qui_meurt_en_plein_message_fait_sortir_le_shim() {
+fn an_upstream_dying_mid_message_makes_the_shim_exit() {
     let start = Instant::now();
     let (out, code) = session("dies_midmessage", &format!("{INIT}\n"), "dies");
 
     assert!(
         start.elapsed() < Duration::from_secs(10),
-        "le shim a attendu une frame qui ne viendrait jamais"
+        "the shim waited for a frame that would never come"
     );
-    assert_eq!(code, 3, "le code de sortie de l'amont doit être propagé");
-    // La frame partielle est relayée, avec son délimiteur ajouté : perdre le
-    // dernier message serait pire que le transmettre incomplet.
-    assert!(out.contains("resu"), "frame partielle attendue : {out:?}");
-    assert!(out.ends_with('\n'), "délimiteur manquant : {out:?}");
+    assert_eq!(code, 3, "the upstream exit code must be propagated");
+    // The partial frame is relayed, with its delimiter appended: losing the last
+    // message would be worse than forwarding it incomplete.
+    assert!(out.contains("resu"), "partial frame expected: {out:?}");
+    assert!(out.ends_with('\n'), "delimiter missing: {out:?}");
 }
 
 #[test]
-fn une_reponse_de_huit_megaoctets_ne_provoque_pas_dinterblocage() {
+fn an_eight_megabyte_response_does_not_deadlock() {
     let start = Instant::now();
     let (out, code) = session("huge", &format!("{INIT}\n"), "huge");
 
     assert!(
         start.elapsed() < Duration::from_secs(30),
-        "interblocage probable : {:?}",
+        "probable deadlock: {:?}",
         start.elapsed()
     );
     assert_eq!(code, 0);
     assert!(
         out.len() > 8 * 1024 * 1024,
-        "charge tronquée : {} octets",
+        "payload truncated: {} bytes",
         out.len()
     );
     assert!(out.ends_with("}\n"));
 }
 
 #[test]
-fn un_amont_qui_viole_la_spec_ne_casse_pas_le_relais() {
+fn an_upstream_violating_the_spec_does_not_break_the_relay() {
     let (out, code) = session("malformed", &format!("{INIT}\n"), "malformed");
 
     assert_eq!(code, 0);
-    // Lignes vides absorbées, JSON invalide relayé tel quel, CRLF préservé,
-    // dernière frame non terminée complétée.
-    assert!(out.contains("ceci n'est pas du json"), "{out:?}");
+    // Blank lines absorbed, invalid JSON relayed verbatim, CRLF preserved,
+    // final unterminated frame completed.
+    assert!(out.contains("this is not json"), "{out:?}");
     assert!(out.contains("\"id\":1"), "{out:?}");
     assert!(out.contains("\"id\":2"), "{out:?}");
-    assert!(
-        !out.starts_with('\n'),
-        "lignes vides non absorbées : {out:?}"
-    );
+    assert!(!out.starts_with('\n'), "blank lines not absorbed: {out:?}");
     assert!(out.ends_with('\n'));
 }
 
-// --- Le cas des orphelins ---
+// --- The orphan case ---
 
 #[test]
-fn aucun_processus_ne_survit_a_larret_du_shim() {
-    // Le mode de défaillance le plus visible en usage réel : trente `node`
-    // fantômes après une journée de travail, et mcpwall comme coupable
-    // désigné. Le serveur utilisé ici ignore délibérément SIGTERM, ce qui
-    // oblige le shim à escalader.
+fn no_process_survives_the_shim_shutting_down() {
+    // The most visible failure mode in real use: thirty ghost `node` processes
+    // after a day's work, with mcpwall as the obvious culprit. The server used
+    // here deliberately ignores SIGTERM, which forces the shim to escalate.
     let db = db_path("orphan");
     let mut shim = Command::new(mcpwall())
         .args(["--db".as_ref(), db.as_os_str()])
@@ -167,44 +162,45 @@ fn aucun_processus_ne_survit_a_larret_du_shim() {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .expect("lancement du shim");
+        .expect("starting the shim");
 
     let shim_pid = shim.id();
 
-    // Attendre que le petit-fils existe.
+    // Wait for the grandchild to exist.
     let child_pid = wait_for(Duration::from_secs(5), || {
         children_of(shim_pid).first().copied()
     })
-    .expect("le serveur amont n'a jamais démarré");
+    .expect("the upstream server never started");
 
-    assert!(alive(child_pid), "l'amont devrait tourner");
+    assert!(alive(child_pid), "the upstream should be running");
 
-    // On tue le shim comme le ferait un client qui se ferme.
+    // We kill the shim the way a closing client would.
     signal(shim_pid, nix::sys::signal::Signal::SIGTERM);
 
     let _ = shim.wait();
 
-    // L'amont ignore SIGTERM ; sans escalade il survivrait. On laisse au shim
-    // le temps de sa fenêtre de grâce puis on vérifie.
-    let mort = wait_for(Duration::from_secs(20), || {
+    // The upstream ignores SIGTERM; without escalation it would survive. We
+    // give the shim its grace window, then check.
+    let dead = wait_for(Duration::from_secs(20), || {
         (!alive(child_pid)).then_some(())
     });
 
-    if mort.is_none() {
-        // Ne pas laisser de trace derrière un test qui échoue.
+    if dead.is_none() {
+        // Do not leave anything behind after a failing test.
         signal(child_pid, nix::sys::signal::Signal::SIGKILL);
     }
     let _ = std::fs::remove_file(&db);
 
     assert!(
-        mort.is_some(),
-        "le serveur amont (pid {child_pid}) a survécu à l'arrêt du shim"
+        dead.is_some(),
+        "the upstream server (pid {child_pid}) survived the shim shutting down"
     );
 }
 
 #[test]
-fn la_fermeture_de_stdin_arrete_lamont() {
-    // Chemin d'arrêt normal de la spec MCP stdio : fermer stdin, l'amont sort.
+fn closing_stdin_stops_the_upstream() {
+    // The normal shutdown path of the stdio MCP spec: close stdin, the upstream
+    // exits.
     let db = db_path("stdin-close");
     let mut shim = Command::new(mcpwall())
         .args(["--db".as_ref(), db.as_os_str()])
@@ -215,13 +211,13 @@ fn la_fermeture_de_stdin_arrete_lamont() {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .expect("lancement du shim");
+        .expect("starting the shim");
 
     let shim_pid = shim.id();
     let child_pid = wait_for(Duration::from_secs(5), || {
         children_of(shim_pid).first().copied()
     })
-    .expect("amont non démarré");
+    .expect("upstream did not start");
 
     drop(shim.stdin.take());
 
@@ -229,21 +225,21 @@ fn la_fermeture_de_stdin_arrete_lamont() {
     let _ = shim.wait();
     assert!(
         start.elapsed() < Duration::from_secs(10),
-        "le shim n'est pas sorti après fermeture de stdin"
+        "the shim did not exit after stdin was closed"
     );
 
-    let mort = wait_for(Duration::from_secs(10), || {
+    let dead = wait_for(Duration::from_secs(10), || {
         (!alive(child_pid)).then_some(())
     });
     let _ = std::fs::remove_file(&db);
-    assert!(mort.is_some(), "l'amont a survécu à la fermeture de stdin");
+    assert!(dead.is_some(), "the upstream survived stdin being closed");
 }
 
 // --- Journal ---
 
 #[test]
-fn le_journal_retrouve_tous_les_appels() {
-    // Critère de sortie M0 : « retrouver tous les appels dans le journal ».
+fn the_journal_records_every_call() {
+    // M0 exit criterion: "find every call again in the journal".
     let db = db_path("journal");
     let input = format!(
         "{INIT}\n\
@@ -273,37 +269,37 @@ fn le_journal_retrouve_tous_les_appels() {
         .expect("log");
     let text = String::from_utf8_lossy(&out.stdout);
 
-    let lignes: Vec<serde_json::Value> = text
+    let lines: Vec<serde_json::Value> = text
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())
         .collect();
 
-    let methodes: Vec<&str> = lignes
+    let methods: Vec<&str> = lines
         .iter()
         .filter_map(|l| l.get("method")?.as_str())
         .collect();
-    assert!(methodes.contains(&"initialize"), "{methodes:?}");
-    assert!(methodes.contains(&"tools/list"), "{methodes:?}");
-    assert!(methodes.contains(&"tools/call"), "{methodes:?}");
+    assert!(methods.contains(&"initialize"), "{methods:?}");
+    assert!(methods.contains(&"tools/list"), "{methods:?}");
+    assert!(methods.contains(&"tools/call"), "{methods:?}");
 
-    // Les trois réponses de l'amont sont là aussi.
-    let reponses = lignes
+    // The upstream's three responses are there too.
+    let responses = lines
         .iter()
         .filter(|l| l["direction"] == "to_client")
         .count();
-    assert_eq!(reponses, 3, "réponses manquantes : {text}");
+    assert_eq!(responses, 3, "responses missing: {text}");
 
-    // La capture de l'`initialize` a renseigné le serveur.
+    // Capturing `initialize` filled in the server.
     assert!(
-        lignes.iter().any(|l| l["server"] == "normal"),
-        "serverInfo non capturé : {text}"
+        lines.iter().any(|l| l["server"] == "normal"),
+        "serverInfo not captured: {text}"
     );
 
-    // Le scope est résolu et sa provenance stockée.
-    let source = lignes[0]["scope_source"].as_str().unwrap_or("");
+    // The scope is resolved and its provenance stored.
+    let source = lines[0]["scope_source"].as_str().unwrap_or("");
     assert!(
         ["injected", "roots", "cwd"].contains(&source),
-        "provenance inattendue : {source}"
+        "unexpected provenance: {source}"
     );
 
     let stats = Command::new(mcpwall())
@@ -313,22 +309,22 @@ fn le_journal_retrouve_tous_les_appels() {
         .expect("stats");
     let stats = String::from_utf8_lossy(&stats.stdout);
     assert!(stats.contains("sessions        1"), "{stats}");
-    assert!(stats.contains("bloqués         0"), "{stats}");
+    assert!(stats.contains("blocked         0"), "{stats}");
 
     let _ = std::fs::remove_file(&db);
 }
 
 #[test]
-fn le_projet_injecte_prime_sur_le_cwd() {
-    // Maillon 1 de la chaîne de provenance : `--project`, écrit par
-    // `mcpwall init`. Il doit l'emporter et débloquer la portée `forever`.
+fn the_injected_project_beats_the_cwd() {
+    // Link 1 of the provenance chain: `--project`, written by `mcpwall init`.
+    // It must win, and it must unlock the `forever` scope.
     let db = db_path("project");
-    let projet = std::env::temp_dir();
+    let project = std::env::temp_dir();
 
     let mut child = Command::new(mcpwall())
         .args(["--db".as_ref(), db.as_os_str()])
         .arg("wrap")
-        .args(["--project".as_ref(), projet.as_os_str()])
+        .args(["--project".as_ref(), project.as_os_str()])
         .arg("--")
         .arg(server("normal"))
         .stdin(Stdio::piped())
@@ -351,13 +347,13 @@ fn le_projet_injecte_prime_sur_le_cwd() {
         .lines()
         .next()
         .and_then(|l| serde_json::from_str(l).ok())
-        .expect("au moins une ligne");
+        .expect("at least one line");
 
     assert_eq!(first["scope_source"], "injected", "{text}");
     let _ = std::fs::remove_file(&db);
 }
 
-// --- Outillage processus ---
+// --- Process helpers ---
 
 fn signal(pid: u32, sig: nix::sys::signal::Signal) {
     if let Ok(pid) = i32::try_from(pid) {
@@ -365,10 +361,10 @@ fn signal(pid: u32, sig: nix::sys::signal::Signal) {
     }
 }
 
-/// Le processus existe-t-il encore ?
+/// Does the process still exist?
 ///
-/// `kill(pid, 0)` ne fait que tester. Un zombie répond encore présent, d'où le
-/// filtrage sur l'état dans `ps`.
+/// `kill(pid, 0)` only tests. A zombie still answers present, hence filtering
+/// on the state reported by `ps`.
 fn alive(pid: u32) -> bool {
     let Ok(out) = Command::new("ps")
         .args(["-o", "state=", "-p", &pid.to_string()])

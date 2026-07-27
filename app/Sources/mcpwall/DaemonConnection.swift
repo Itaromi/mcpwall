@@ -1,6 +1,6 @@
 import Foundation
 
-/// Messages reçus du daemon.
+/// Messages received from the daemon.
 enum ServerMessage {
     case prompt(Prompt)
     case withdraw(promptID: UInt64)
@@ -19,15 +19,15 @@ struct Prompt: Identifiable, Equatable {
     let findings: [String]
     let scopeKey: String
     let scopeSource: String
-    /// Si faux, l'interface **ne doit pas** proposer « Toujours autoriser ».
-    /// Le daemon rétrograderait de toute façon la décision, mais offrir un
-    /// bouton dont l'effet n'est pas celui annoncé est pire qu'un bouton absent.
+    /// If false, the interface **must not** offer "Always allow". The daemon
+    /// would downgrade the decision anyway, but offering a button whose effect
+    /// is not the one advertised is worse than an absent button.
     let foreverAllowed: Bool
     let timeoutSeconds: UInt64
 
     var id: UInt64 { promptID }
 
-    /// Ce qui est demandé, en une ligne.
+    /// What is being asked, in one line.
     var title: String {
         if let tool { return tool }
         return method
@@ -48,34 +48,33 @@ enum Until: String {
     case once, session, forever
 }
 
-/// Connexion au daemon, en I/O bloquante sur un thread dédié.
+/// Connection to the daemon, in blocking I/O on a dedicated thread.
 ///
-/// Le protocole est du JSON délimité par retour ligne ; une boucle de lecture
-/// suffit et évite d'avoir à raisonner sur des lectures partielles dans le code
-/// d'interface.
+/// The protocol is newline-delimited JSON; a single read loop is enough and
+/// avoids having to reason about partial reads in the interface code.
 ///
-/// La connexion se rétablit toute seule : le daemon peut être redémarré, mis à
-/// jour, ou simplement plus lent à démarrer que l'app qui l'a lancé.
+/// The connection re-establishes itself: the daemon may be restarted, updated,
+/// or simply slower to start than the app that launched it.
 final class DaemonConnection: @unchecked Sendable {
-    /// Doit correspondre à `IPC_VERSION` côté Rust.
+    /// Must match `IPC_VERSION` on the Rust side.
     static let ipcVersion: UInt32 = 2
 
     private let socketPath: String
 
-    /// Boucle de lecture. Elle **bloque** pour toute la durée de la connexion.
+    /// Read loop. It **blocks** for the whole lifetime of the connection.
     private let readQueue = DispatchQueue(label: "mcpwall.ipc.read")
 
-    /// Écritures. Une file distincte, et ce n'est pas un détail : poster les
-    /// envois sur la file de lecture les mettait en attente derrière une
-    /// lecture bloquante qui ne rend jamais la main. `subscribe` n'était donc
-    /// jamais envoyé, et les boutons du panneau n'auraient rien fait.
+    /// Writes. A separate queue, and that is not a detail: posting sends onto
+    /// the read queue left them stuck behind a blocking read that never returns.
+    /// `subscribe` was therefore never sent, and the panel's buttons would have
+    /// done nothing.
     private let writeQueue = DispatchQueue(label: "mcpwall.ipc.write")
 
-    /// Protège `fd`, partagé entre les deux files.
+    /// Guards `fd`, shared between the two queues.
     private let lock = NSLock()
     private var fd: Int32 = -1
 
-    /// N'est touché que depuis `readQueue`.
+    /// Only ever touched from `readQueue`.
     private var readBuffer = Data()
 
     private let runFlag = NSLock()
@@ -85,7 +84,7 @@ final class DaemonConnection: @unchecked Sendable {
         set { runFlag.lock(); _shouldRun = newValue; runFlag.unlock() }
     }
 
-    /// Appelés sur la file principale.
+    /// Called on the main queue.
     var onMessage: ((ServerMessage) -> Void)?
     var onConnectionChange: ((Bool) -> Void)?
 
@@ -106,14 +105,14 @@ final class DaemonConnection: @unchecked Sendable {
     }
 
     func stop() {
-        // Pas de saut de file : `readQueue` est occupée par une lecture
-        // bloquante, y poster l'arrêt ne servirait à rien. On ferme le
-        // descripteur, ce qui fait rendre la lecture.
+        // No queue hopping: `readQueue` is busy on a blocking read, posting the
+        // stop there would achieve nothing. We close the descriptor, which makes
+        // the read return.
         shouldRun = false
         closeConnection()
     }
 
-    // MARK: - Envoi
+    // MARK: - Sending
 
     func answer(promptID: UInt64, allow: Bool, until: Until) {
         send([
@@ -135,21 +134,20 @@ final class DaemonConnection: @unchecked Sendable {
             let fd = self.fd
             self.lock.unlock()
             guard fd >= 0, !Self.write(object, to: fd) else { return }
-            // Le daemon est parti. La boucle de lecture s'en apercevra et
-            // relancera la connexion ; inutile de le traiter deux fois.
+            // The daemon is gone. The read loop will notice and reopen the
+            // connection; no need to handle it twice.
             self.closeConnection()
         }
     }
 
-    // MARK: - Boucle
+    // MARK: - Loop
 
     private func runLoop() {
         while shouldRun {
             guard connect() else {
-                // Attente avant nouvelle tentative. Assez court pour que
-                // l'utilisateur ne voie pas l'app « déconnectée » longtemps
-                // après avoir relancé le daemon, assez long pour ne pas
-                // marteler le système de fichiers.
+                // Wait before retrying. Short enough that the user does not see
+                // the app "disconnected" long after restarting the daemon, long
+                // enough not to hammer the filesystem.
                 Thread.sleep(forTimeInterval: 1.0)
                 continue
             }
@@ -159,17 +157,17 @@ final class DaemonConnection: @unchecked Sendable {
         }
     }
 
-    /// Dernier échec journalisé.
+    /// Last failure logged.
     ///
-    /// On tait les **répétitions** — une boucle de reconnexion qui écrit une
-    /// ligne par seconde noie le journal — mais jamais un motif d'échec
-    /// différent : c'est exactement celui-là qui explique l'incident.
+    /// We silence **repeats** — a reconnection loop writing one line per second
+    /// drowns the log — but never a different failure reason: that is precisely
+    /// the one that explains the incident.
     private var lastFailure: String?
 
     private func connect() -> Bool {
         let sock = socket(AF_UNIX, SOCK_STREAM, 0)
         guard sock >= 0 else {
-            logFailure("socket() : \(String(cString: strerror(errno)))")
+            logFailure("socket(): \(String(cString: strerror(errno)))")
             return false
         }
 
@@ -177,10 +175,10 @@ final class DaemonConnection: @unchecked Sendable {
         addr.sun_family = sa_family_t(AF_UNIX)
 
         let pathBytes = Array(socketPath.utf8)
-        // `sun_path` fait 104 octets sur macOS. Un dépassement silencieux
-        // produirait une connexion vers un chemin tronqué, donc vers rien.
+        // `sun_path` is 104 bytes on macOS. A silent overflow would produce a
+        // connection to a truncated path, and so to nothing.
         guard pathBytes.count < MemoryLayout.size(ofValue: addr.sun_path) else {
-            logFailure("chemin de socket trop long : \(socketPath)")
+            logFailure("socket path too long: \(socketPath)")
             close(sock)
             return false
         }
@@ -195,7 +193,7 @@ final class DaemonConnection: @unchecked Sendable {
             }
         }
         guard result == 0 else {
-            logFailure("connect(\(socketPath)) : \(String(cString: strerror(errno)))")
+            logFailure("connect(\(socketPath)): \(String(cString: strerror(errno)))")
             close(sock)
             return false
         }
@@ -205,20 +203,20 @@ final class DaemonConnection: @unchecked Sendable {
         lock.unlock()
         readBuffer.removeAll(keepingCapacity: true)
 
-        // Handshake, puis abonnement. Les deux sont écrits ici, sur le même
-        // chemin : ils font partie de l'établissement de la connexion, pas du
-        // trafic courant.
+        // Handshake, then subscription. Both are written here, on the same
+        // path: they are part of establishing the connection, not of ordinary
+        // traffic.
         //
-        // Faire passer `subscribe` par `writeQueue` le perdait — la file n'est
-        // pas encore en service à cet instant. L'app tournait alors sans jamais
-        // recevoir de demande, et le daemon refusait chaque `ask` en expliquant
-        // qu'aucune interface n'était là pour confirmer.
+        // Routing `subscribe` through `writeQueue` lost it — the queue is not
+        // yet in service at this point. The app then ran without ever receiving
+        // a prompt, and the daemon refused every `ask` explaining that no
+        // interface was there to confirm.
         let hello: [String: Any] = [
             "mcpwall_ipc": Int(Self.ipcVersion),
             "build": Bundle.main.shortVersion,
         ]
         guard Self.write(hello, to: sock) else {
-            logFailure("envoi du hello impossible")
+            logFailure("could not send the hello")
             closeConnection()
             return false
         }
@@ -227,38 +225,38 @@ final class DaemonConnection: @unchecked Sendable {
             return false
         }
         guard Self.write(["type": "subscribe"], to: sock) else {
-            logFailure("abonnement impossible")
+            logFailure("could not subscribe")
             closeConnection()
             return false
         }
         Self.write(["type": "status"], to: sock)
 
         lastFailure = nil
-        NSLog("mcpwall: connecté au daemon")
+        NSLog("mcpwall: connected to the daemon")
         isConnected = true
         return true
     }
 
     private func readHello() -> Bool {
         guard let line = readLine() else {
-            logFailure("aucune réponse au hello")
+            logFailure("no answer to the hello")
             return false
         }
-        // `as? UInt32` échouerait : le pont NSNumber ne convertit que vers les
-        // types larges. On passe par `Int`, seule forme garantie.
+        // `as? UInt32` would fail: the NSNumber bridge only converts to the
+        // wide types. We go through `Int`, the only guaranteed form.
         guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)),
               let dict = object as? [String: Any],
               let version = dict["mcpwall_ipc"] as? Int
         else {
-            logFailure("hello du daemon illisible : \(line)")
+            logFailure("unreadable daemon hello: \(line)")
             return false
         }
 
         guard version == Int(Self.ipcVersion) else {
-            // Le daemon n'est pas celui qu'on croit — typiquement un daemon
-            // resté en place après une mise à jour de l'app. On refuse plutôt
-            // que d'interpréter au mieux des messages qu'on ne comprend pas.
-            logFailure("version IPC incompatible (daemon \(version), app \(Self.ipcVersion))")
+            // The daemon is not the one we think — typically a daemon left in
+            // place after an app update. We refuse rather than interpret
+            // charitably messages we do not understand.
+            logFailure("incompatible IPC version (daemon \(version), app \(Self.ipcVersion))")
             return false
         }
         return true
@@ -271,14 +269,13 @@ final class DaemonConnection: @unchecked Sendable {
         }
     }
 
-    // MARK: - Entrées/sorties
+    // MARK: - I/O
 
-    /// Écrit un objet suivi d'un retour ligne.
+    /// Writes an object followed by a newline.
     ///
-    /// Appels système directs plutôt que `FileHandle` : ce dernier est conçu
-    /// pour les fichiers et les tubes, et son écriture bloquait indéfiniment
-    /// sur un socket Unix — quarante octets qui ne partaient jamais, sans
-    /// erreur ni trace.
+    /// Direct system calls rather than `FileHandle`: the latter is designed for
+    /// files and pipes, and its write blocked forever on a Unix socket — forty
+    /// bytes that never left, with no error and no trace.
     @discardableResult
     private static func write(_ object: [String: Any], to fd: Int32) -> Bool {
         guard var data = try? JSONSerialization.data(withJSONObject: object) else { return false }
@@ -288,8 +285,8 @@ final class DaemonConnection: @unchecked Sendable {
             guard let base = raw.baseAddress else { return false }
             var sent = 0
             while sent < raw.count {
-                // `send` avec MSG_NOSIGNAL n'existe pas sur Darwin ; SIGPIPE est
-                // désactivé à l'ouverture du socket par SO_NOSIGPIPE.
+                // `send` with MSG_NOSIGNAL does not exist on Darwin; SIGPIPE is
+                // disabled when the socket is opened, via SO_NOSIGPIPE.
                 let n = Darwin.write(fd, base.advanced(by: sent), raw.count - sent)
                 if n > 0 {
                     sent += n
@@ -303,7 +300,7 @@ final class DaemonConnection: @unchecked Sendable {
         }
     }
 
-    /// Lit une ligne, en accumulant les lectures partielles.
+    /// Reads one line, accumulating partial reads.
     private func readLine() -> String? {
         while true {
             if let index = readBuffer.firstIndex(of: 0x0A) {
@@ -347,7 +344,7 @@ final class DaemonConnection: @unchecked Sendable {
         if old >= 0 { close(old) }
     }
 
-    // MARK: - Décodage
+    // MARK: - Decoding
 
     static func decode(_ line: String) -> ServerMessage? {
         guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)),
@@ -389,8 +386,8 @@ final class DaemonConnection: @unchecked Sendable {
                 uiConnected: dict["ui_connected"] as? Bool ?? false
             ))
 
-        // `verdict` circule sur les connexions de shim, jamais ici. On l'ignore
-        // sans bruit plutôt que de le traiter comme une anomalie.
+        // `verdict` travels on shim connections, never here. We ignore it
+        // quietly rather than treat it as an anomaly.
         default:
             return nil
         }

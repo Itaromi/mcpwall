@@ -1,10 +1,10 @@
 // swift-tools-version: 6.0
 import PackageDescription
 
-// Pas de projet Xcode : le bundle .app est assemblé par `scripts/build-app.sh`
-// à partir de ce binaire. Ça se construit avec les seuls Command Line Tools,
-// donc en CI comme sur une machine de développement, sans dépendre d'une
-// version d'Xcode installée.
+// No Xcode project: the .app bundle is assembled by `scripts/build-app.sh`
+// from this binary. It builds with the Command Line Tools alone, so in CI just
+// as on a development machine, without depending on an installed Xcode
+// version.
 let package = Package(
     name: "mcpwall",
     platforms: [.macOS(.v14)],

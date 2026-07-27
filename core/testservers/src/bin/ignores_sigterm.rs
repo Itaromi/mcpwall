@@ -1,11 +1,11 @@
-//! Serveur qui ignore SIGTERM.
+//! A server that ignores SIGTERM.
 //!
-//! Sans escalade en SIGKILL, c'est exactement l'orphelin qu'on cherche à
-//! éviter : trente processus fantômes après une journée de travail.
+//! Without escalation to SIGKILL this is exactly the orphan we are trying to
+//! avoid: thirty ghost processes after a day's work.
 
 fn main() {
-    // SIG_IGN sur SIGTERM et SIGINT via la commande `trap` du shell serait plus
-    // simple, mais on veut un vrai binaire pour tester le chemin réel.
+    // SIG_IGN on SIGTERM and SIGINT via the shell's `trap` builtin would be
+    // simpler, but we want a real binary so the real path gets tested.
     unsafe {
         libc_signal(15, 1); // SIGTERM -> SIG_IGN
         libc_signal(2, 1); // SIGINT  -> SIG_IGN

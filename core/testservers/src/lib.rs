@@ -1,12 +1,11 @@
-//! Serveurs MCP factices pour les tests d'intégration.
+//! Fake MCP servers for the integration tests.
 //!
-//! Volontairement écrits en I/O bloquante et sans dépendance à `mcpwall` : ils
-//! doivent pouvoir mal se comporter sans que ce soit notre code qui décide
-//! comment.
+//! Deliberately written with blocking I/O and no dependency on `mcpwall`: they
+//! must be free to misbehave without our own code deciding how.
 
 use std::io::{BufRead, Write};
 
-/// Lit une ligne. `None` en fin de flux.
+/// Reads one line. `None` at end of stream.
 pub fn read_line() -> Option<String> {
     let mut line = String::new();
     let n = std::io::stdin().lock().read_line(&mut line).ok()?;
@@ -19,7 +18,7 @@ pub fn write_line(s: &str) {
     let _ = out.flush();
 }
 
-/// Réponse à `initialize`, conforme à la révision 2025-11-25.
+/// Response to `initialize`, conforming to revision 2025-11-25.
 pub fn initialize_result(id: &serde_json::Value, name: &str) -> String {
     serde_json::json!({
         "jsonrpc": "2.0",

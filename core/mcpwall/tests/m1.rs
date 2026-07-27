@@ -1,7 +1,8 @@
-//! Tests d'intégration M1 : daemon réel, shim réel, socket réel.
+//! M1 integration tests: real daemon, real shim, real socket.
 //!
-//! Le test qui définit le jalon est [`une_lecture_de_env_est_bloquee_sans_casser_la_session`] :
-//! bloquer doit ressembler à un échec d'outil ordinaire, pas à une panne.
+//! The test that defines the milestone is
+//! [`reading_a_dotenv_is_blocked_without_breaking_the_session`]: blocking must
+//! look like an ordinary tool failure, not like a crash.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -19,18 +20,18 @@ fn server(name: &str) -> PathBuf {
     p
 }
 
-/// Répertoire de travail court.
+/// A short working directory.
 ///
-/// `sockaddr_un.sun_path` ne fait que 104 octets sur macOS ; le répertoire
-/// temporaire de la CI suffit à le dépasser.
+/// `sockaddr_un.sun_path` is only 104 bytes on macOS; CI's temporary directory
+/// is enough to blow past it.
 fn workdir(tag: &str) -> PathBuf {
     let d = PathBuf::from(format!("/tmp/mw-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).expect("répertoire de travail");
+    std::fs::create_dir_all(&d).expect("working directory");
     d
 }
 
-/// Daemon lancé pour la durée d'un test, tué à la sortie.
+/// A daemon started for the duration of one test, killed on the way out.
 struct Daemon {
     child: Child,
     socket: PathBuf,
@@ -42,7 +43,7 @@ impl Daemon {
         let dir = workdir(tag);
         let socket = dir.join("d.sock");
         let policy_path = dir.join("policy.yaml");
-        std::fs::write(&policy_path, policy).expect("politique");
+        std::fs::write(&policy_path, policy).expect("policy");
 
         let child = Command::new(mcpwall())
             .arg("daemon")
@@ -51,19 +52,19 @@ impl Daemon {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .expect("lancement du daemon");
+            .expect("starting the daemon");
 
-        // Attendre que le socket apparaisse plutôt que de dormir au hasard.
+        // Wait for the socket to appear rather than sleeping at random.
         let start = Instant::now();
         while !socket.exists() && start.elapsed() < Duration::from_secs(10) {
             std::thread::sleep(Duration::from_millis(25));
         }
-        assert!(socket.exists(), "le daemon n'a pas créé son socket");
+        assert!(socket.exists(), "the daemon did not create its socket");
 
         Self { child, socket, dir }
     }
 
-    /// Conduit une session à travers le shim et rend sa sortie.
+    /// Drives a session through the shim and returns its output.
     fn session(&self, input: &str) -> String {
         let mut child = Command::new(mcpwall())
             .args(["--db".as_ref(), self.dir.join("j.db").as_os_str()])
@@ -75,17 +76,13 @@ impl Daemon {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .expect("lancement du shim");
+            .expect("starting the shim");
 
         if let Some(mut si) = child.stdin.take() {
             let _ = si.write_all(input.as_bytes());
         }
-        let out = child.wait_with_output().expect("attente du shim");
-        assert_eq!(
-            out.status.code(),
-            Some(0),
-            "la session doit sortir proprement"
-        );
+        let out = child.wait_with_output().expect("waiting for the shim");
+        assert_eq!(out.status.code(), Some(0), "the session must exit cleanly");
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
 }
@@ -109,16 +106,16 @@ rules:
       arg_path_matches: ["**/.env", "**/id_rsa"]
     action: deny
     severity: high
-    message: "accès à un fichier de secrets"
+    message: "access to a secrets file"
   - id: secret_pattern
     when:
       arg_matches_secret: true
     action: deny
-    message: "un argument ressemble à un identifiant secret"
+    message: "an argument looks like a secret credential"
 overrides: []
 "#;
 
-/// Extrait les réponses indexées par `id`.
+/// Extracts the responses, indexed by `id`.
 fn by_id(out: &str) -> std::collections::BTreeMap<i64, serde_json::Value> {
     out.lines()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
@@ -126,45 +123,42 @@ fn by_id(out: &str) -> std::collections::BTreeMap<i64, serde_json::Value> {
         .collect()
 }
 
-// --- Le critère de sortie du jalon ---
+// --- The milestone exit criterion ---
 
 #[test]
-fn une_lecture_de_env_est_bloquee_sans_casser_la_session() {
+fn reading_a_dotenv_is_blocked_without_breaking_the_session() {
     let d = Daemon::start("m1-env", POLICY);
 
     let input = format!(
         "{INIT}\n\
-         {{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{{\"name\":\"read_file\",\"arguments\":{{\"path\":\"/Users/x/projet/.env\"}}}}}}\n\
-         {{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{{\"name\":\"read_file\",\"arguments\":{{\"path\":\"/Users/x/projet/README.md\"}}}}}}\n"
+         {{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{{\"name\":\"read_file\",\"arguments\":{{\"path\":\"/Users/x/project/.env\"}}}}}}\n\
+         {{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{{\"name\":\"read_file\",\"arguments\":{{\"path\":\"/Users/x/project/README.md\"}}}}}}\n"
     );
     let out = d.session(&input);
     let responses = by_id(&out);
 
-    // L'initialize passe : le bloquer tuerait la session entière.
-    let init = responses.get(&1).expect("réponse d'initialize");
+    // initialize goes through: blocking it would kill the whole session.
+    let init = responses.get(&1).expect("initialize response");
     assert_eq!(init["result"]["protocolVersion"], "2025-11-25");
 
-    // Le .env est bloqué, sous la forme d'un échec d'outil ordinaire.
-    let denied = responses.get(&2).expect("réponse au .env");
+    // The .env is blocked, in the shape of an ordinary tool failure.
+    let denied = responses.get(&2).expect("response to the .env");
     assert_eq!(denied["result"]["isError"], true);
-    assert!(
-        denied.get("error").is_none(),
-        "jamais d'erreur de protocole"
-    );
+    assert!(denied.get("error").is_none(), "never a protocol error");
     let text = denied["result"]["content"][0]["text"]
         .as_str()
         .unwrap_or_default();
     assert!(text.starts_with("blocked by mcpwall:"), "{text}");
     assert!(text.contains("secrets_paths"), "{text}");
 
-    // Et surtout : la session continue, l'appel suivant aboutit normalement.
-    let allowed = responses.get(&3).expect("réponse au README");
+    // And above all: the session continues, the next call succeeds normally.
+    let allowed = responses.get(&3).expect("response to the README");
     assert_eq!(allowed["result"]["content"][0]["text"], "ok");
     assert!(allowed["result"].get("isError").is_none());
 }
 
 #[test]
-fn un_secret_dans_les_arguments_est_bloque_sans_etre_recopie() {
+fn a_secret_in_the_arguments_is_blocked_without_being_copied() {
     let d = Daemon::start("m1-secret", POLICY);
     let secret = "AKIAIOSFODNN7EXAMPLE";
 
@@ -173,51 +167,48 @@ fn un_secret_dans_les_arguments_est_bloque_sans_etre_recopie() {
          {{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{{\"name\":\"http_post\",\"arguments\":{{\"body\":\"{secret}\"}}}}}}\n"
     );
     let out = d.session(&input);
-    let denied = by_id(&out).remove(&2).expect("réponse");
+    let denied = by_id(&out).remove(&2).expect("response");
 
     assert_eq!(denied["result"]["isError"], true);
     let text = denied["result"]["content"][0]["text"]
         .as_str()
         .unwrap_or_default();
-    assert!(
-        text.contains("AKIAIO"),
-        "le préfixe doit être montré : {text}"
-    );
+    assert!(text.contains("AKIAIO"), "the prefix must be shown: {text}");
     assert!(
         !text.contains(secret),
-        "le secret ne doit jamais être recopié : {text}"
+        "the secret must never be copied through: {text}"
     );
 }
 
 #[test]
-fn le_trafic_ordinaire_traverse_le_daemon_sans_encombre() {
-    let d = Daemon::start("m1-ordinaire", POLICY);
+fn ordinary_traffic_crosses_the_daemon_untroubled() {
+    let d = Daemon::start("m1-ordinary", POLICY);
 
     let input = format!(
         "{INIT}\n\
          {{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}}\n\
-         {{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{{\"name\":\"echo\",\"arguments\":{{\"text\":\"bonjour\"}}}}}}\n"
+         {{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{{\"name\":\"echo\",\"arguments\":{{\"text\":\"hello\"}}}}}}\n"
     );
     let out = d.session(&input);
     let r = by_id(&out);
 
-    assert_eq!(r.len(), 3, "toutes les réponses doivent revenir : {out}");
+    assert_eq!(r.len(), 3, "every response must come back: {out}");
     for id in [1, 2, 3] {
         assert!(
             r[&id]["result"].get("isError").is_none(),
-            "id {id} bloqué à tort : {out}"
+            "id {id} wrongly blocked: {out}"
         );
     }
 }
 
-// --- Le mode dégradé ---
+// --- Degraded mode ---
 
 #[test]
-fn sans_daemon_le_shim_relaie_quand_meme() {
-    // La règle de disponibilité §4. Si fermer l'app paralysait les serveurs MCP,
-    // mcpwall serait désinstallé dans l'heure.
-    let dir = workdir("m1-sans-daemon");
-    let absent = dir.join("inexistant.sock");
+fn with_no_daemon_the_shim_relays_anyway() {
+    // The availability rule of §4. If closing the app paralysed the MCP
+    // servers, mcpwall would be uninstalled within the hour.
+    let dir = workdir("m1-no-daemon");
+    let absent = dir.join("nonexistent.sock");
 
     let mut child = Command::new(mcpwall())
         .args(["--db".as_ref(), dir.join("j.db").as_os_str()])
@@ -239,31 +230,35 @@ fn sans_daemon_le_shim_relaie_quand_meme() {
             .as_bytes(),
         );
     }
-    let out = child.wait_with_output().expect("attente");
+    let out = child.wait_with_output().expect("wait");
     let text = String::from_utf8_lossy(&out.stdout);
     let r = by_id(&text);
 
     assert_eq!(out.status.code(), Some(0));
-    assert_eq!(r.len(), 2, "le trafic doit passer sans daemon : {text}");
+    assert_eq!(
+        r.len(),
+        2,
+        "traffic must go through without a daemon: {text}"
+    );
     assert!(
         r[&2]["result"].get("isError").is_none(),
-        "sans daemon, rien ne doit être bloqué : {text}"
+        "with no daemon, nothing may be blocked: {text}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn un_daemon_qui_meurt_en_cours_de_session_ne_la_casse_pas() {
-    let mut d = Daemon::start("m1-mort", POLICY);
+fn a_daemon_dying_mid_session_does_not_break_it() {
+    let mut d = Daemon::start("m1-dead", POLICY);
 
-    // Une première session confirme que le blocage fonctionne.
-    let bloqué = d.session(&format!(
+    // A first session confirms that blocking works.
+    let blocked = d.session(&format!(
         "{INIT}\n{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{{\"name\":\"read_file\",\"arguments\":{{\"path\":\"/x/.env\"}}}}}}\n"
     ));
-    assert_eq!(by_id(&bloqué)[&2]["result"]["isError"], true);
+    assert_eq!(by_id(&blocked)[&2]["result"]["isError"], true);
 
-    // Le daemon disparaît — mise à jour, app fermée, crash.
+    // The daemon vanishes — update, app closed, crash.
     let _ = d.child.kill();
     let _ = d.child.wait();
 
@@ -271,38 +266,38 @@ fn un_daemon_qui_meurt_en_cours_de_session_ne_la_casse_pas() {
         "{INIT}\n{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{{\"name\":\"read_file\",\"arguments\":{{\"path\":\"/x/.env\"}}}}}}\n"
     ));
     let r = by_id(&out);
-    assert_eq!(r.len(), 2, "la session doit rester utilisable : {out}");
+    assert_eq!(r.len(), 2, "the session must stay usable: {out}");
     assert!(
         r[&2]["result"].get("isError").is_none(),
-        "fail-open attendu : {out}"
+        "fail-open expected: {out}"
     );
 }
 
-// --- Handshake de version ---
+// --- Version handshake ---
 
 #[test]
-fn un_shim_de_version_incompatible_passe_en_fail_open() {
-    // Le cas du client MCP resté ouvert pendant une mise à jour. On simule un
-    // vieux shim en parlant directement au socket.
+fn a_shim_of_an_incompatible_version_goes_fail_open() {
+    // The case of the MCP client left open across an update. We simulate an old
+    // shim by talking to the socket directly.
     use std::io::{BufRead, BufReader};
     use std::os::unix::net::UnixStream;
 
     let d = Daemon::start("m1-version", POLICY);
 
-    let stream = UnixStream::connect(&d.socket).expect("connexion");
+    let stream = UnixStream::connect(&d.socket).expect("connect");
     let mut write = stream.try_clone().expect("clone");
     let mut lines = BufReader::new(stream).lines();
 
-    // Version volontairement fausse.
-    writeln!(write, r#"{{"mcpwall_ipc": 99, "build": "ancien"}}"#).expect("hello");
+    // Deliberately wrong version.
+    writeln!(write, r#"{{"mcpwall_ipc": 99, "build": "old"}}"#).expect("hello");
 
-    let reply = lines.next().expect("réponse").expect("ligne");
+    let reply = lines.next().expect("response").expect("line");
     let hello: serde_json::Value = serde_json::from_str(&reply).expect("json");
-    assert_eq!(hello["mcpwall_ipc"], 2, "le daemon annonce sa version");
+    assert_eq!(hello["mcpwall_ipc"], 2, "the daemon announces its version");
 
-    // Le daemon ferme la connexion plutôt que de risquer un verdict mal
-    // interprété : un verdict incompris, c'est soit un blocage fantôme, soit un
-    // trou dans le pare-feu.
+    // The daemon closes the connection rather than risk a misread verdict: a
+    // misunderstood verdict is either a phantom block or a hole in the
+    // firewall.
     writeln!(
         write,
         r#"{{"type":"decide","method":"tools/call","frame":"{{}}","scope_key":"x","scope_source":"cwd","scope_paths":[],"server":null,"session_id":0}}"#
@@ -310,23 +305,23 @@ fn un_shim_de_version_incompatible_passe_en_fail_open() {
     .ok();
     assert!(
         lines.next().is_none(),
-        "aucun verdict ne doit être rendu après un handshake incompatible"
+        "no verdict may be issued after an incompatible handshake"
     );
 }
 
 #[test]
-fn un_handshake_compatible_est_accepte() {
+fn a_compatible_handshake_is_accepted() {
     use std::io::{BufRead, BufReader};
     use std::os::unix::net::UnixStream;
 
     let d = Daemon::start("m1-handshake", POLICY);
 
-    let stream = UnixStream::connect(&d.socket).expect("connexion");
+    let stream = UnixStream::connect(&d.socket).expect("connect");
     let mut write = stream.try_clone().expect("clone");
     let mut lines = BufReader::new(stream).lines();
 
     writeln!(write, r#"{{"mcpwall_ipc": 2, "build": "test"}}"#).expect("hello");
-    let _ = lines.next().expect("hello du daemon");
+    let _ = lines.next().expect("daemon hello");
 
     let frame = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -343,34 +338,34 @@ fn un_handshake_compatible_est_accepte() {
         "server": null,
         "session_id": 1,
     });
-    writeln!(write, "{req}").expect("requête");
+    writeln!(write, "{req}").expect("request");
 
-    let reply = lines.next().expect("verdict").expect("ligne");
+    let reply = lines.next().expect("verdict").expect("line");
     let v: serde_json::Value = serde_json::from_str(&reply).expect("json");
-    assert_eq!(v["type"], "verdict", "le daemon étiquette ses messages");
+    assert_eq!(v["type"], "verdict", "the daemon tags its messages");
     assert_eq!(v["outcome"], "deny");
     assert_eq!(v["rule"], "secrets_paths");
-    // Provenance de rang 1 : `forever` est offrable.
+    // Rank 1 provenance: `forever` can be offered.
     assert_eq!(v["forever_allowed"], true);
 }
 
 #[test]
-fn forever_est_refuse_en_provenance_faible() {
-    // La garde de sécurité du scope, vue depuis le protocole : c'est le daemon
-    // qui calcule `forever_allowed`, pour que l'UI n'ait pas à refaire le
-    // raisonnement — et ne puisse pas se tromper en le refaisant.
+fn forever_is_refused_on_weak_provenance() {
+    // The scope security guard, seen from the protocol: it is the daemon that
+    // computes `forever_allowed`, so the UI need not redo the reasoning — and
+    // cannot get it wrong by redoing it.
     use std::io::{BufRead, BufReader};
     use std::os::unix::net::UnixStream;
 
     let d = Daemon::start("m1-forever", POLICY);
 
-    let stream = UnixStream::connect(&d.socket).expect("connexion");
+    let stream = UnixStream::connect(&d.socket).expect("connect");
     let mut write = stream.try_clone().expect("clone");
     let mut lines = BufReader::new(stream).lines();
     writeln!(write, r#"{{"mcpwall_ipc": 2, "build": "test"}}"#).expect("hello");
     let _ = lines.next();
 
-    for (source, attendu) in [
+    for (source, expected) in [
         ("injected", true),
         ("roots", true),
         ("cwd", false),
@@ -386,9 +381,9 @@ fn forever_est_refuse_en_provenance_faible() {
             "server": null,
             "session_id": 1,
         });
-        writeln!(write, "{req}").expect("requête");
-        let reply = lines.next().expect("verdict").expect("ligne");
+        writeln!(write, "{req}").expect("request");
+        let reply = lines.next().expect("verdict").expect("line");
         let v: serde_json::Value = serde_json::from_str(&reply).expect("json");
-        assert_eq!(v["forever_allowed"], attendu, "provenance {source}");
+        assert_eq!(v["forever_allowed"], expected, "provenance {source}");
     }
 }

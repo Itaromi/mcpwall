@@ -1,25 +1,25 @@
-//! Cycle de vie d'une session stdio : lancer l'amont, câbler les pompes,
-//! mourir proprement.
+//! Lifecycle of a stdio session: start the upstream, wire the pumps, die
+//! cleanly.
 //!
-//! C'est ici que ce projet casse des sessions réelles s'il est mal écrit. Les
-//! quatre modes de défaillance, et ce qu'on en fait :
+//! This is where this project breaks real sessions if written badly. The four
+//! failure modes, and what we do about them:
 //!
-//! - **Orphelins.** Le client tue le shim ; sans relais de signal, le serveur
-//!   amont survit. Trente `node` fantômes après une journée de travail, et
-//!   mcpwall est le coupable désigné. On relaie `SIGTERM`/`SIGINT`, puis on
-//!   escalade en `SIGKILL` après délai.
-//! - **Suspension.** L'amont meurt, le shim reste bloqué sur une lecture qui ne
-//!   rendra jamais rien. On surveille le processus en parallèle des pompes.
-//! - **Interblocage par contre-pression.** Une tâche par direction, strictement
-//!   indépendantes, aucun verrou détenu à travers un `await`. Une réponse de
-//!   8 Mo dans un sens ne doit pas empêcher l'autre de progresser.
-//! - **Code de sortie perdu.** Le client lit le code de sortie du shim ; il doit
-//!   être celui de l'amont, sans quoi un serveur qui échoue au démarrage a l'air
-//!   d'avoir réussi.
+//! - **Orphans.** The client kills the shim; with no signal relaying, the
+//!   upstream server survives. Thirty ghost `node` processes after a day's
+//!   work, and mcpwall is the obvious culprit. We relay `SIGTERM`/`SIGINT`,
+//!   then escalate to `SIGKILL` after a grace period.
+//! - **Hangs.** The upstream dies, the shim stays blocked on a read that will
+//!   never return anything. We watch the process alongside the pumps.
+//! - **Back-pressure deadlock.** One task per direction, strictly independent,
+//!   no lock held across an `await`. An 8 MB response in one direction must not
+//!   stop the other from making progress.
+//! - **Lost exit code.** The client reads the shim's exit code; it must be the
+//!   upstream's, otherwise a server that fails at startup looks like it
+//!   succeeded.
 //!
-//! `stderr` n'est pas pompé : il est hérité. Zéro tâche, zéro tampon, zéro
-//! troisième descripteur à interbloquer, et le comportement observé est
-//! exactement celui de l'amont non enveloppé.
+//! `stderr` is not pumped: it is inherited. Zero tasks, zero buffers, zero
+//! third descriptor to deadlock on, and the observed behaviour is exactly that
+//! of the unwrapped upstream.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -35,16 +35,16 @@ use crate::frame::DEFAULT_MAX_FRAME_BYTES;
 use crate::mcp::DecisionPoint;
 use crate::wrap::{Direction, Observer, Pump};
 
-/// Délai laissé à l'amont pour sortir après `SIGTERM` avant `SIGKILL`.
+/// Grace given to the upstream to exit after `SIGTERM` before `SIGKILL`.
 const GRACE: Duration = Duration::from_secs(5);
 
-/// Comment lancer et surveiller un serveur MCP amont.
+/// How to start and supervise an upstream MCP server.
 pub struct SessionConfig {
     pub program: OsString,
     pub args: Vec<OsString>,
     pub max_frame_bytes: usize,
-    /// Maillon 1 de la chaîne de provenance de scope, injecté par
-    /// `mcpwall init` dans la configuration du client.
+    /// Link 1 of the scope provenance chain, injected by `mcpwall init` into
+    /// the client configuration.
     pub project: Option<PathBuf>,
 }
 
@@ -59,11 +59,11 @@ impl SessionConfig {
     }
 }
 
-/// Lance l'amont, relaie, et rend son code de sortie.
+/// Starts the upstream, relays, and returns its exit code.
 ///
-/// `stdin`/`stdout` sont fournis par l'appelant plutôt que pris sur le processus
-/// afin que les tests puissent conduire une vraie session sans détourner les
-/// descripteurs du binaire de test.
+/// `stdin`/`stdout` are supplied by the caller rather than taken from the
+/// process so that tests can drive a real session without hijacking the test
+/// binary's own descriptors.
 pub async fn run<I, O>(
     config: SessionConfig,
     client_in: I,
@@ -79,27 +79,27 @@ where
         .args(&config.args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        // Hérité, pas pompé : le client voit les diagnostics de l'amont
-        // exactement comme sans mcpwall.
+        // Inherited, not pumped: the client sees the upstream's diagnostics
+        // exactly as it would without mcpwall.
         .stderr(Stdio::inherit())
-        // Sans ça, l'enfant hérite du groupe de processus et reçoit le Ctrl-C du
-        // terminal en même temps que nous, ce qui rend l'ordre d'arrêt
-        // indéterminé. On veut être seuls maîtres de son arrêt.
+        // Without this the child inherits the process group and receives the
+        // terminal's Ctrl-C at the same time we do, which makes the shutdown
+        // ordering indeterminate. We want sole control over its shutdown.
         .kill_on_drop(true)
         .spawn()
-        .with_context(|| format!("lancement de {:?}", config.program))?;
+        .with_context(|| format!("starting {:?}", config.program))?;
 
     let child_in = child
         .stdin
         .take()
-        .ok_or_else(|| anyhow!("stdin de l'amont indisponible"))?;
+        .ok_or_else(|| anyhow!("upstream stdin unavailable"))?;
     let child_out = child
         .stdout
         .take()
-        .ok_or_else(|| anyhow!("stdout de l'amont indisponible"))?;
+        .ok_or_else(|| anyhow!("upstream stdout unavailable"))?;
 
-    // Voie de retour des réponses de blocage : décidées en montée, écrites en
-    // descente.
+    // Return path for block responses: decided on the way up, written on the
+    // way down.
     let (denied_tx, denied_rx) = mpsc::unbounded_channel();
 
     let up = Pump {
@@ -117,51 +117,51 @@ where
         denied_tx: None,
     };
 
-    // Deux tâches indépendantes. Aucune n'attend l'autre : une réponse amont de
-    // plusieurs mégaoctets ne doit pas empêcher une requête de monter.
+    // Two independent tasks. Neither waits on the other: a multi-megabyte
+    // upstream response must not stop a request from going up.
     let mut up_task = tokio::spawn(async move { up.run(client_in, child_in, None).await });
     let mut down_task =
         tokio::spawn(async move { down.run(child_out, client_out, Some(denied_rx)).await });
 
     let mut signals = Signals::new()?;
 
-    // Trois issues possibles : l'amont sort, un signal arrive, ou le client
-    // ferme stdin. On les attend toutes en parallèle.
-    // Chacune des trois issues est terminale : on ne boucle pas, on attend
-    // celle qui se présente la première.
+    // Three possible outcomes: the upstream exits, a signal arrives, or the
+    // client closes stdin. We wait on all three in parallel.
+    // Each of the three is terminal: we do not loop, we wait for whichever
+    // comes first.
     let status = tokio::select! {
-        // L'amont a fini. C'est l'issue normale.
-        res = child.wait() => res.context("attente de l'amont")?,
+        // The upstream is done. This is the normal outcome.
+        res = child.wait() => res.context("waiting for the upstream")?,
 
-        // Le client nous tue. On transmet, on n'abandonne pas l'enfant.
+        // The client kills us. We pass it on, we do not abandon the child.
         sig = signals.next() => {
             let sig = sig.unwrap_or(TermSignal::Term);
-            tracing::info!(signal = sig.as_str(), "signal reçu, transmission à l'amont");
+            tracing::info!(signal = sig.as_str(), "signal received, forwarding to the upstream");
             terminate(&mut child, sig).await;
-            child.wait().await.context("attente après signal")?
+            child.wait().await.context("waiting after signal")?
         }
 
-        // Le client a fermé stdin : la pompe montante est arrivée en bout de
-        // flux et a libéré le descripteur, ce qui ferme le stdin de l'amont.
+        // The client closed stdin: the upward pump reached end of stream and
+        // released the descriptor, which closes the upstream's stdin.
         res = &mut up_task => {
             if let Ok(Err(e)) = res {
-                tracing::warn!(erreur = %e, "pompe montante interrompue");
+                tracing::warn!(error = %e, "upward pump interrupted");
             }
-            // Arrêt propre selon la spec MCP : fermer stdin, attendre, puis
-            // escalader seulement si l'amont s'accroche.
+            // Clean shutdown per the MCP spec: close stdin, wait, then escalate
+            // only if the upstream hangs on.
             match tokio::time::timeout(GRACE, child.wait()).await {
-                Ok(res) => res.context("attente après EOF client")?,
+                Ok(res) => res.context("waiting after client EOF")?,
                 Err(_) => {
-                    tracing::warn!("l'amont n'a pas quitté après fermeture de stdin");
+                    tracing::warn!("the upstream did not exit after stdin was closed");
                     terminate(&mut child, TermSignal::Term).await;
-                    child.wait().await.context("attente après escalade")?
+                    child.wait().await.context("waiting after escalation")?
                 }
             }
         }
     };
 
-    // L'amont est mort : on laisse un instant à la pompe descendante pour vider
-    // ce qu'il a écrit avant de sortir, sinon on perdrait sa dernière réponse.
+    // The upstream is dead: give the downward pump a moment to drain what it
+    // wrote before exiting, otherwise we would lose its last response.
     let _ = tokio::time::timeout(Duration::from_millis(200), &mut down_task).await;
     down_task.abort();
     up_task.abort();
@@ -169,10 +169,11 @@ where
     Ok(exit_code(&status))
 }
 
-/// Code de sortie observable par le client.
+/// Exit code as observed by the client.
 ///
-/// Un processus tué par signal n'a pas de code ; la convention shell est
-/// `128 + signal`. La reproduire évite qu'un amont tué ressemble à un succès.
+/// A process killed by a signal has no code; the shell convention is
+/// `128 + signal`. Reproducing it keeps a killed upstream from looking like a
+/// success.
 fn exit_code(status: &std::process::ExitStatus) -> i32 {
     if let Some(code) = status.code() {
         return code;
@@ -202,20 +203,21 @@ impl TermSignal {
     }
 }
 
-/// Transmet le signal à l'amont, puis escalade s'il s'accroche.
+/// Forwards the signal to the upstream, then escalates if it hangs on.
 ///
-/// L'escalade n'est pas une politesse : un serveur qui ignore `SIGTERM` et qu'on
-/// n'achève pas devient exactement l'orphelin qu'on cherche à éviter.
+/// Escalation is not a courtesy: a server that ignores `SIGTERM` and is not
+/// finished off becomes exactly the orphan we are trying to avoid.
 async fn terminate(child: &mut tokio::process::Child, sig: TermSignal) {
     #[cfg(unix)]
     if let Some(pid) = child.id() {
         use nix::sys::signal::{Signal, kill};
         use nix::unistd::Pid;
 
-        // `Child::kill` de tokio n'envoie que SIGKILL, ce qui priverait l'amont
-        // de toute chance de s'arrêter proprement — fermer ses fichiers, vider
-        // ses tampons. On passe donc par `kill(2)`, via l'enveloppe sûre de
-        // `nix` pour ne pas avoir à déroger au `forbid(unsafe_code)` du core.
+        // Tokio's `Child::kill` only sends SIGKILL, which would deny the
+        // upstream any chance of shutting down cleanly — closing its files,
+        // flushing its buffers. So we go through `kill(2)`, via `nix`'s safe
+        // wrapper so as not to have to carve an exception out of the core's
+        // `forbid(unsafe_code)`.
         let raw = match sig {
             TermSignal::Term => Signal::SIGTERM,
             TermSignal::Int => Signal::SIGINT,
@@ -226,12 +228,15 @@ async fn terminate(child: &mut tokio::process::Child, sig: TermSignal) {
     }
 
     if tokio::time::timeout(GRACE, child.wait()).await.is_err() {
-        tracing::warn!("l'amont ignore {}, escalade en SIGKILL", sig.as_str());
+        tracing::warn!(
+            "the upstream ignores {}, escalating to SIGKILL",
+            sig.as_str()
+        );
         let _ = child.start_kill();
     }
 }
 
-/// Écoute `SIGTERM` et `SIGINT`.
+/// Listens for `SIGTERM` and `SIGINT`.
 struct Signals {
     #[cfg(unix)]
     term: tokio::signal::unix::Signal,
@@ -245,8 +250,8 @@ impl Signals {
         {
             use tokio::signal::unix::{SignalKind, signal};
             Ok(Self {
-                term: signal(SignalKind::terminate()).context("écoute de SIGTERM")?,
-                int: signal(SignalKind::interrupt()).context("écoute de SIGINT")?,
+                term: signal(SignalKind::terminate()).context("listening for SIGTERM")?,
+                int: signal(SignalKind::interrupt()).context("listening for SIGINT")?,
             })
         }
         #[cfg(not(unix))]
