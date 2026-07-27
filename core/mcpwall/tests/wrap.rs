@@ -7,7 +7,7 @@
 use std::sync::{Arc, Mutex};
 
 use mcpwall::frame::SplitterStats;
-use mcpwall::mcp::{AllowAll, CallContext, DecisionPoint, Disposition, Verdict};
+use mcpwall::mcp::{AllowAll, CallContext, DecisionError, DecisionPoint, Disposition, Verdict};
 use mcpwall::wrap::{Anomaly, Direction, FrameEvent, Observer, Pump};
 use tokio::sync::mpsc;
 
@@ -78,11 +78,25 @@ impl Recorder {
 struct DenyAll;
 
 impl DecisionPoint for DenyAll {
-    fn decide(&self, _ctx: &CallContext<'_>) -> Verdict {
-        Verdict::Deny {
+    fn decide(&self, _ctx: &CallContext<'_>) -> Result<Verdict, DecisionError> {
+        Ok(Verdict::Deny {
             rule: "test_rule".into(),
             message: "tainted local data in outbound argument".into(),
-        }
+        })
+    }
+}
+
+/// Point de décision en panne. Simule un daemon injoignable.
+struct Broken {
+    fail_closed: bool,
+}
+
+impl DecisionPoint for Broken {
+    fn decide(&self, _ctx: &CallContext<'_>) -> Result<Verdict, DecisionError> {
+        Err(DecisionError {
+            reason: "daemon injoignable".into(),
+            fail_closed: self.fail_closed,
+        })
     }
 }
 
@@ -401,4 +415,65 @@ async fn les_compteurs_remontent_en_fin_de_flux() {
     assert_eq!(stats.frames, 1);
     assert_eq!(stats.empty_skipped, 1);
     assert_eq!(stats.crlf, 1);
+}
+
+// --- Panne du point de décision ---
+
+#[tokio::test]
+async fn un_point_de_decision_en_panne_laisse_passer() {
+    // Règle de disponibilité §4 appliquée à notre propre code : si le daemon
+    // est tombé, on ne casse pas la session de l'agent.
+    let input = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{}}\n";
+    let obs = Arc::new(Recorder::default());
+    let mut out = Vec::new();
+
+    pump(
+        Direction::ToServer,
+        obs.clone(),
+        Arc::new(Broken { fail_closed: false }),
+    )
+    .run(&input[..], &mut out, None)
+    .await
+    .expect("relais");
+
+    assert_eq!(out, input, "le trafic doit passer malgré la panne");
+    assert!(
+        obs.anomalies()
+            .iter()
+            .any(|a| a.contains("DecisionUnavailable")),
+        "l'incident doit être signalé : {:?}",
+        obs.anomalies()
+    );
+}
+
+#[tokio::test]
+async fn fail_closed_bloque_quand_la_politique_le_demande() {
+    // L'utilisateur qui a explicitement demandé fail_closed obtient un blocage,
+    // pas un passage silencieux.
+    let input = b"{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"tools/call\",\"params\":{}}\n";
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let obs = Arc::new(Recorder::default());
+    let mut out = Vec::new();
+
+    Pump {
+        direction: Direction::ToServer,
+        max_frame_bytes: 1024,
+        observer: obs.clone(),
+        decision: Arc::new(Broken { fail_closed: true }),
+        denied_tx: Some(tx),
+    }
+    .run(&input[..], &mut out, None)
+    .await
+    .expect("relais");
+
+    assert!(out.is_empty(), "rien ne doit atteindre l'amont");
+    let payload = rx.recv().await.expect("réponse de blocage attendue");
+    let v: serde_json::Value = serde_json::from_slice(payload.trim_ascii_end()).expect("json");
+    assert_eq!(v["result"]["isError"], true);
+    assert!(
+        v["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("fail_closed")
+    );
 }

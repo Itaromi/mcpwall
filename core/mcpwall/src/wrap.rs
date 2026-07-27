@@ -75,6 +75,13 @@ pub enum Anomaly {
     Unterminated { direction: Direction },
     /// Frame bloquée qui n'attend aucune réponse : rien à renvoyer au client.
     DeniedWithoutId { direction: Direction },
+    /// Le point de décision n'a pas pu se prononcer. Le trafic est passé — ou
+    /// a été bloqué si `fail_closed` est actif.
+    DecisionUnavailable {
+        direction: Direction,
+        reason: String,
+        fail_closed: bool,
+    },
 }
 
 /// Destination de tout ce que le relais observe.
@@ -218,10 +225,31 @@ impl Pump {
         // l'ensemble DECIDE. Tout le reste évite l'appel entièrement.
         let verdict = match (self.direction, disposition, method) {
             (Direction::ToServer, Disposition::Decide, Some(m)) => {
-                Some(self.decision.decide(&CallContext {
+                let ctx = CallContext {
                     method: m,
                     frame: frame.content(),
-                }))
+                };
+                match self.decision.decide(&ctx) {
+                    Ok(v) => Some(v),
+                    // Le point de décision n'a pas su répondre. On ne panique
+                    // pas, on ne devine pas : par défaut le trafic passe, et
+                    // l'incident est signalé. Casser la session d'un agent
+                    // parce que notre propre daemon est tombé serait le pire
+                    // arbitrage possible — sauf si l'utilisateur a explicitement
+                    // demandé `fail_closed`.
+                    Err(err) => {
+                        let fail_closed = err.fail_closed;
+                        self.observer.on_anomaly(&Anomaly::DecisionUnavailable {
+                            direction: self.direction,
+                            reason: err.reason,
+                            fail_closed,
+                        });
+                        fail_closed.then(|| Verdict::Deny {
+                            rule: "fail_closed".to_owned(),
+                            message: "policy engine unavailable".to_owned(),
+                        })
+                    }
+                }
             }
             _ => None,
         };

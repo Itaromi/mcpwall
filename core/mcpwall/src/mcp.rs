@@ -327,10 +327,40 @@ pub struct CallContext<'a> {
 }
 
 /// En M0 l'unique implémentation est [`AllowAll`]. En M1 c'est le client du
-/// socket Unix qui l'implémente. Le point d'ancrage existe dès maintenant pour
-/// que le passage à M1 ne soit pas une réécriture de `wrap.rs`.
-pub trait DecisionPoint {
-    fn decide(&self, ctx: &CallContext<'_>) -> Verdict;
+/// socket Unix qui l'implémente.
+///
+/// **Faillible exprès.** Un client de socket doit pouvoir dire « je n'ai pas pu
+/// joindre le daemon » sans avoir à mentir `Allow` ni à paniquer. L'appelant
+/// traite tout `Err` comme un `Allow` journalisé : c'est la règle de
+/// disponibilité §4 appliquée au code de mcpwall lui-même. Sans ce `Result`, le
+/// seul recours en M1 serait un `unwrap` déguisé dans le chemin du shim.
+pub trait DecisionPoint: Send + Sync {
+    fn decide(&self, ctx: &CallContext<'_>) -> Result<Verdict, DecisionError>;
+}
+
+/// Le point de décision n'a pas pu se prononcer. Jamais fatal.
+#[derive(Debug, Clone)]
+pub struct DecisionError {
+    pub reason: String,
+    /// La politique demande-t-elle de fermer en cas de panne ? Renseigné par le
+    /// client du daemon à partir de `fail_closed`, faute de quoi l'appelant
+    /// laisse passer.
+    pub fail_closed: bool,
+}
+
+impl DecisionError {
+    pub fn open(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            fail_closed: false,
+        }
+    }
+}
+
+impl fmt::Display for DecisionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.reason)
+    }
 }
 
 /// M0 : observation seule.
@@ -338,8 +368,8 @@ pub trait DecisionPoint {
 pub struct AllowAll;
 
 impl DecisionPoint for AllowAll {
-    fn decide(&self, _ctx: &CallContext<'_>) -> Verdict {
-        Verdict::Allow
+    fn decide(&self, _ctx: &CallContext<'_>) -> Result<Verdict, DecisionError> {
+        Ok(Verdict::Allow)
     }
 }
 

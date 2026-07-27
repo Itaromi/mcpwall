@@ -25,3 +25,6 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      # Le benchmark n'assert qu'en release : un binaire de debug mesure le coût
+      # des vérifications de débordement, pas celui du produit.
+      - run: cargo test --release --test bench -- --nocapture

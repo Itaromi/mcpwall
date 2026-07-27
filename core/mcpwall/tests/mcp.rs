@@ -233,7 +233,10 @@ fn m0_autorise_tout() {
         method: "tools/call",
         frame: b"{}",
     };
-    assert_eq!(AllowAll.decide(&ctx), mcpwall::mcp::Verdict::Allow);
+    assert_eq!(
+        AllowAll.decide(&ctx).expect("AllowAll ne peut pas échouer"),
+        mcpwall::mcp::Verdict::Allow
+    );
 }
 
 // --- Capture de l'initialize ---
