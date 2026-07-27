@@ -353,6 +353,10 @@ everything.
 - Left click: an `NSPopover` with counters (calls / blocked / active servers,
   plus the lost journal entry counter), the last 10 entries, "Block everything"
   and "Journal" buttons, settings.
+  "Journal" navigates **inside the popover** to a compact two-line-per-entry
+  list. Checking what just went past is the common case, and sending the user
+  to a 900-point window for it is friction. The window stays one click away
+  from that page, for what 320 points cannot do: filtering and export.
 - **Decision prompt**: definitely not an `NSPopover` (it closes on focus loss and
   does not show above a full-screen terminal). Use an `NSPanel` with
   `level = .statusBar`, a `collectionBehavior` including `.canJoinAllSpaces` and
@@ -568,6 +572,22 @@ error and no trace. `FileHandle` is designed for files and pipes.
 through the write queue lost it, and the app ran without ever receiving a
 prompt — the daemon then refused every `ask`, explaining that no interface was
 there.
+
+**2026-07-27 — The popover is sized by SwiftUI, not by a hard-coded
+`contentSize`.** `NSHostingController` only publishes a `preferredContentSize`
+when given `sizingOptions`. Without it the value stays zero, NSPopover does its
+geometry against the 420-point `contentSize` that had been set by hand, and the
+bubble ends up anchored for a frame its ~210 points of content never fill —
+visibly detached from the menu bar icon. The same fix makes the popover grow
+correctly as the prompt list fills up.
+
+**2026-07-27 — The journal opens inside the popover.** Glancing at what just
+went past is the common case; the 900-point window was friction for it. The
+in-popover list is deliberately not the window's `Table` — six columns do not
+fit in 320 points, and a popover you scroll sideways is worse than none. The
+window keeps what a narrow column genuinely cannot do: filtering and JSONL
+export. Reading is now off the main thread, because spawning `mcpwall log` on it
+stuttered the popover's opening animation — precisely when the user is looking.
 
 **2026-07-27 — The bundle is assembled by hand, with no Xcode project.** Builds
 identically in CI and on a machine that has only the Command Line Tools. The

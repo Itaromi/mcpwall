@@ -8,21 +8,38 @@ import SwiftUI
 /// What a left click on the icon shows.
 ///
 /// Deliberately sparse: some counters, the latest prompts, three ways out.
-/// Anything that needs careful reading belongs in the Journal window, not in a
-/// panel that closes the moment you look away.
+/// The journal opens *inside* the popover rather than in a separate window —
+/// checking what just went past is the common case, and sending the user to a
+/// 900-point window for it is friction. The window stays one click away for
+/// what a 320-point column genuinely cannot do: filtering and export.
 struct PopoverView: View {
     @ObservedObject var model: AppModel
     let actions: PopoverActions
 
+    private enum Page {
+        case home
+        case journal
+    }
+
+    @State private var page: Page = .home
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            header
-            Divider()
-            counters
-            Divider()
-            recent
-            Divider()
-            footer
+            switch page {
+            case .home:
+                header
+                Divider()
+                counters
+                Divider()
+                recent
+                Divider()
+                footer
+            case .journal:
+                PopoverJournalView(
+                    onBack: { page = .home },
+                    onOpenWindow: actions.openJournal
+                )
+            }
         }
         .frame(width: 320)
     }
@@ -110,7 +127,7 @@ struct PopoverView: View {
             }
 
             HStack(spacing: 8) {
-                Button("Journal", action: actions.openJournal)
+                Button("Journal") { page = .journal }
                 Button("Policy", action: actions.openPolicy)
                 Spacer()
                 Menu {
@@ -125,6 +142,157 @@ struct PopoverView: View {
             }
             .padding(12)
         }
+    }
+}
+
+/// The journal, inside the popover.
+///
+/// Deliberately not the window's `Table`: six columns do not fit in 320 points,
+/// and a popover you have to scroll sideways is worse than no popover at all.
+/// Two lines per entry, newest first, and the full window one click away for
+/// filtering and export.
+private struct PopoverJournalView: View {
+    let onBack: () -> Void
+    let onOpenWindow: () -> Void
+
+    @State private var entries: [JournalEntry] = []
+    @State private var error: String?
+    @State private var loading = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            Divider()
+            content
+        }
+        .onAppear(perform: load)
+    }
+
+    private var header: some View {
+        HStack(spacing: 8) {
+            Button(action: onBack) {
+                Image(systemName: "chevron.backward")
+            }
+            .buttonStyle(.borderless)
+            .help("Back")
+
+            Text("Journal").font(.headline)
+
+            Spacer()
+
+            Button(action: onOpenWindow) {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+            }
+            .buttonStyle(.borderless)
+            .help("Open the full journal — filtering and JSONL export")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if loading {
+            note("Reading the journal…")
+        } else if let error {
+            note(error)
+        } else if entries.isEmpty {
+            note("Nothing yet. Traffic from your MCP servers will appear here.")
+        } else {
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(entries) { entry in
+                        JournalRow(entry: entry)
+                        Divider()
+                    }
+                }
+            }
+            // A definite height, not a `maxHeight`. A `ScrollView` has no
+            // intrinsic height, and the popover is sized from the content's
+            // fitting size — left to itself the list collapses to nothing.
+            // Rows are a fixed height for exactly this reason, so the arithmetic
+            // holds: few entries give a short bubble, many stop at the cap and
+            // scroll.
+            .frame(height: min(CGFloat(entries.count) * JournalRow.height, 320))
+        }
+    }
+
+    private func note(_ text: String) -> some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+    }
+
+    private func load() {
+        JournalEntry.loadRecent(limit: 200) { result in
+            loading = false
+            switch result {
+            case .success(let rows): entries = rows
+            case .failure(let failure): error = "\(failure)"
+            }
+        }
+    }
+}
+
+/// One journal line, on two rows because 320 points is not a table.
+private struct JournalRow: View {
+    /// Fixed, divider included. The list computes its own height from this, so
+    /// a row that grew to fit its text would desynchronise the two.
+    static let height: CGFloat = 35
+
+    let entry: JournalEntry
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: icon)
+                .font(.caption2)
+                .foregroundStyle(tint)
+                .frame(width: 11)
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(entry.method)
+                        .font(.system(.caption, design: .monospaced))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 4)
+                    Text(entry.timestamp, format: .dateTime.hour().minute().second())
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+
+                HStack(spacing: 4) {
+                    Text(entry.server)
+                    if !entry.scope.isEmpty {
+                        Text("·")
+                        // Truncated at the head: the tail of a path is what
+                        // identifies the project, the prefix is always /Users/…
+                        Text(entry.scope).lineLimit(1).truncationMode(.head)
+                    }
+                    if entry.verdict == "deny", let rule = entry.rule {
+                        Text("·")
+                        Text(rule).foregroundStyle(.red)
+                    }
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            }
+        }
+        .padding(.horizontal, 12)
+        .frame(height: Self.height - 1, alignment: .center)
+    }
+
+    private var icon: String {
+        if entry.verdict == "deny" { return "hand.raised.fill" }
+        return entry.direction == "to_server" ? "arrow.up" : "arrow.down"
+    }
+
+    private var tint: Color {
+        entry.verdict == "deny" ? .red : .secondary
     }
 }
 
@@ -144,6 +312,49 @@ struct JournalEntry: Identifiable, Hashable {
     let scope: String
     let scopeSource: String
     let bytes: Int
+}
+
+extension JournalEntry {
+    /// Reads the journal, newest first, off the main thread.
+    ///
+    /// `CoreCommand.run` spawns a process and waits for it. Doing that on the
+    /// main thread stutters the popover's opening animation — which is exactly
+    /// the moment the user is looking at it. The completion runs on the main
+    /// queue, so callers can assign to `@State` directly.
+    static func loadRecent(
+        limit: Int,
+        completion: @escaping (Result<[JournalEntry], Error>) -> Void
+    ) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Result {
+                let output = try CoreCommand.run(["log", "-n", "\(limit)", "--json"])
+                // `mcpwall log` prints oldest first; the interface wants the
+                // newest at the top.
+                return Array(output.split(separator: "\n").compactMap { parse(String($0)) }.reversed())
+            }
+            DispatchQueue.main.async { completion(result) }
+        }
+    }
+
+    static func parse(_ line: String) -> JournalEntry? {
+        guard let data = line.data(using: .utf8),
+              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let ts = dict["ts_ms"] as? Double
+        else { return nil }
+
+        return JournalEntry(
+            timestamp: Date(timeIntervalSince1970: ts / 1000),
+            direction: dict["direction"] as? String ?? "",
+            method: dict["method"] as? String ?? "(response)",
+            disposition: dict["disposition"] as? String ?? "",
+            verdict: dict["verdict"] as? String,
+            rule: dict["rule"] as? String,
+            server: dict["server"] as? String ?? "?",
+            scope: (dict["scope"] as? String ?? "").replacingOccurrences(of: "project:", with: ""),
+            scopeSource: dict["scope_source"] as? String ?? "unknown",
+            bytes: dict["bytes"] as? Int ?? 0
+        )
+    }
 }
 
 /// The Journal window.
@@ -242,15 +453,14 @@ struct JournalView: View {
     }
 
     private func reload() {
-        do {
-            let output = try CoreCommand.run(["log", "-n", "500", "--json"])
-            entries = output
-                .split(separator: "\n")
-                .compactMap { Self.parse(String($0)) }
-                .reversed()
-            error = nil
-        } catch {
-            self.error = "\(error)"
+        JournalEntry.loadRecent(limit: 500) { result in
+            switch result {
+            case .success(let rows):
+                entries = rows
+                error = nil
+            case .failure(let failure):
+                error = "\(failure)"
+            }
         }
     }
 
@@ -267,25 +477,6 @@ struct JournalView: View {
         }
     }
 
-    static func parse(_ line: String) -> JournalEntry? {
-        guard let data = line.data(using: .utf8),
-              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let ts = dict["ts_ms"] as? Double
-        else { return nil }
-
-        return JournalEntry(
-            timestamp: Date(timeIntervalSince1970: ts / 1000),
-            direction: dict["direction"] as? String ?? "",
-            method: dict["method"] as? String ?? "(response)",
-            disposition: dict["disposition"] as? String ?? "",
-            verdict: dict["verdict"] as? String,
-            rule: dict["rule"] as? String,
-            server: dict["server"] as? String ?? "?",
-            scope: (dict["scope"] as? String ?? "").replacingOccurrences(of: "project:", with: ""),
-            scopeSource: dict["scope_source"] as? String ?? "unknown",
-            bytes: dict["bytes"] as? Int ?? 0
-        )
-    }
 }
 
 // ---------------------------------------------------------------------------
