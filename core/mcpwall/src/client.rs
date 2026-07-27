@@ -1,0 +1,213 @@
+//! Client du daemon, côté shim.
+//!
+//! Implémente [`DecisionPoint`] par-dessus le socket Unix. C'est le seul
+//! endroit où mcpwall peut casser la session d'un utilisateur pour une raison
+//! qui ne le regarde pas — un daemon arrêté, une mise à jour en cours — donc
+//! c'est ici que la règle de disponibilité §4 s'applique le plus littéralement.
+//!
+//! ## Pourquoi un thread système et pas une tâche
+//!
+//! Retenir une frame avant qu'elle n'atteigne l'amont impose que le verdict
+//! soit rendu **avant** que le relais poursuive : le point de décision est donc
+//! synchrone, appelé depuis le corps d'une pompe async. Si l'I/O du socket
+//! vivait sur le même exécuteur, l'attente du verdict bloquerait la tâche qui
+//! doit produire ce verdict — un interblocage garanti sur un runtime
+//! mono-thread.
+//!
+//! La connexion vit donc sur un thread système dédié, en I/O bloquante, et le
+//! dialogue passe par des canaux `std`. Le relais bloque son thread, le socket
+//! progresse sur le sien.
+
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::time::Duration;
+
+use crate::ipc::{DecideRequest, DecideResponse, Hello, Outcome};
+use crate::mcp::{CallContext, DecisionError, DecisionPoint, Verdict};
+use crate::scope::Scope;
+
+/// Délai au-delà duquel on cesse d'attendre un verdict.
+///
+/// Un daemon lent est un daemon en panne du point de vue de l'agent : au-delà,
+/// on préfère laisser passer que suspendre son outil. Le timeout couvre aussi
+/// le cas du daemon vivant mais bloqué, que le handshake ne détecte pas.
+const DECIDE_TIMEOUT: Duration = Duration::from_secs(5);
+
+type Pending = (DecideRequest, mpsc::Sender<Option<DecideResponse>>);
+
+pub struct DaemonClient {
+    tx: mpsc::Sender<Pending>,
+    /// Le daemon a-t-il déjà été jugé injoignable ?
+    ///
+    /// Un shim qui a perdu le daemon ne retente pas à chaque appel : ce serait
+    /// payer un timeout par outil pour rien.
+    degraded: AtomicBool,
+    fail_closed: bool,
+    session: SessionInfo,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SessionInfo {
+    pub scope_key: String,
+    pub scope_source: String,
+    pub scope_paths: Vec<PathBuf>,
+    pub server: Option<String>,
+    pub session_id: i64,
+}
+
+impl SessionInfo {
+    pub fn from_scope(scope: &Scope, session_id: i64) -> Self {
+        Self {
+            scope_key: scope.key(),
+            scope_source: scope.source().as_str().to_owned(),
+            scope_paths: scope.paths().to_vec(),
+            server: None,
+            session_id,
+        }
+    }
+}
+
+impl DaemonClient {
+    /// Se connecte et effectue le handshake.
+    ///
+    /// Rend `None` si le daemon est absent ou parle une autre version : le
+    /// shim relaie alors sans politique. C'est un mode dégradé assumé, pas une
+    /// erreur — l'app peut être fermée, et fermer l'app ne doit pas paralyser
+    /// les serveurs MCP de l'utilisateur.
+    pub fn connect(socket: &Path, fail_closed: bool, session: SessionInfo) -> Option<Self> {
+        let stream = match UnixStream::connect(socket) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    socket = %socket.display(),
+                    erreur = %e,
+                    "daemon injoignable — relais sans politique"
+                );
+                return None;
+            }
+        };
+        stream.set_read_timeout(Some(DECIDE_TIMEOUT)).ok()?;
+        stream.set_write_timeout(Some(DECIDE_TIMEOUT)).ok()?;
+
+        let mut write = stream.try_clone().ok()?;
+        let mut lines = BufReader::new(stream).lines();
+
+        let mine = Hello::default();
+        writeln!(write, "{}", serde_json::to_string(&mine).ok()?).ok()?;
+
+        let reply = lines.next()?.ok()?;
+        let peer: Hello = serde_json::from_str(&reply).ok()?;
+
+        if !peer.compatible() {
+            // Visible exprès : c'est le cas du client MCP resté ouvert pendant
+            // une mise à jour, et l'utilisateur doit comprendre pourquoi son
+            // pare-feu ne filtre plus.
+            tracing::error!(
+                shim = mine.mcpwall_ipc,
+                daemon = peer.mcpwall_ipc,
+                build_daemon = %peer.build,
+                "version IPC incompatible — mcpwall NE FILTRE PAS cette session. \
+                 Redémarrez le client MCP pour reprendre un shim à jour."
+            );
+            return None;
+        }
+
+        let (tx, rx) = mpsc::channel::<Pending>();
+
+        // Un seul thread possède la connexion : les requêtes sont sérialisées
+        // naturellement, sans verrou.
+        std::thread::Builder::new()
+            .name("mcpwall-ipc".into())
+            .spawn(move || {
+                for (req, reply) in rx {
+                    let response = (|| {
+                        let payload = serde_json::to_string(&req).ok()?;
+                        writeln!(write, "{payload}").ok()?;
+                        write.flush().ok()?;
+                        let line = lines.next()?.ok()?;
+                        serde_json::from_str::<DecideResponse>(&line).ok()
+                    })();
+
+                    let failed = response.is_none();
+                    let _ = reply.send(response);
+                    if failed {
+                        break; // connexion morte, les appelants basculeront en dégradé
+                    }
+                }
+            })
+            .ok()?;
+
+        Some(Self {
+            tx,
+            degraded: AtomicBool::new(false),
+            fail_closed,
+            session,
+        })
+    }
+
+    pub fn set_server(&mut self, server: Option<String>) {
+        self.session.server = server;
+    }
+
+    pub fn is_degraded(&self) -> bool {
+        self.degraded.load(Ordering::Relaxed)
+    }
+
+    fn error(&self, reason: &str) -> DecisionError {
+        DecisionError {
+            reason: reason.to_owned(),
+            fail_closed: self.fail_closed,
+        }
+    }
+}
+
+impl DecisionPoint for DaemonClient {
+    fn decide(&self, ctx: &CallContext<'_>) -> Result<Verdict, DecisionError> {
+        if self.degraded.load(Ordering::Relaxed) {
+            return Err(self.error("daemon injoignable (état dégradé)"));
+        }
+
+        let req = DecideRequest {
+            method: ctx.method.to_owned(),
+            frame: String::from_utf8_lossy(ctx.frame).into_owned(),
+            scope_key: self.session.scope_key.clone(),
+            scope_source: self.session.scope_source.clone(),
+            scope_paths: self.session.scope_paths.clone(),
+            server: self.session.server.clone(),
+            session_id: self.session.session_id,
+        };
+
+        let (tx, rx) = mpsc::channel();
+        if self.tx.send((req, tx)).is_err() {
+            self.degraded.store(true, Ordering::Relaxed);
+            return Err(self.error("connexion au daemon fermée"));
+        }
+
+        let response = match rx.recv_timeout(DECIDE_TIMEOUT) {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                self.degraded.store(true, Ordering::Relaxed);
+                return Err(self.error("réponse illisible du daemon"));
+            }
+            Err(_) => {
+                self.degraded.store(true, Ordering::Relaxed);
+                return Err(self.error("délai dépassé en attente du verdict"));
+            }
+        };
+
+        Ok(match response.outcome {
+            Outcome::Allow => Verdict::Allow,
+            Outcome::Deny => Verdict::Deny {
+                rule: response.rule.unwrap_or_else(|| "policy".to_owned()),
+                message: response.message,
+            },
+        })
+    }
+}
+
+pub fn decide_timeout() -> Duration {
+    DECIDE_TIMEOUT
+}

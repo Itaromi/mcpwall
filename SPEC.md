@@ -362,7 +362,7 @@ confiance déclenchent un `ask`. La fatigue d'alerte est ce qui tue ce genre d'o
 Travailler jalon par jalon. Ne pas commencer le suivant sans que le précédent tourne
 sur une machine réelle.
 
-**M0 — observation seule** *(en cours)*
+**M0 — observation seule** *(fait)*
 `mcpwall wrap -- <commande>` en stdio, relais transparent, journal SQLite,
 `mcpwall log --tail`, `mcpwall log --stats`. Aucun blocage, aucune UI.
 Critère : envelopper un serveur filesystem réel dans Claude Code, mener une session
@@ -371,16 +371,27 @@ complète sans rien casser, et retrouver tous les appels dans le journal.
 - [x] `frame.rs` — découpage, plafond 32 Mo, resynchronisation
 - [x] `mcp.rs` — scan de méthode, OBSERVE/DECIDE, point de décision, capture `initialize`
 - [x] `scope.rs` — chaîne de provenance, clé de scope, URI de racine
-- [ ] `wrap.rs` — fork amont, pompes stdin/stdout/stderr
-- [ ] journal SQLite, deux chemins
-- [ ] CLI `wrap` / `log --tail` / `log --stats`
-- [ ] serveurs MCP factices
+- [x] `wrap.rs` — pompes de relais, voie de retour des blocages
+- [x] `session.rs` — fork amont, signaux, EOF, code de sortie
+- [x] journal SQLite, deux chemins
+- [x] CLI `wrap` / `log --tail` / `log --stats`
+- [x] serveurs MCP factices + tests d'intégration sur vrais processus
+- [x] benchmark de latence en CI
 
-**M1 — daemon + politique**
+Latence mesurée en `--release` : **p99 3,4 µs** sur frame courte, 6,1 µs quand la méthode
+est repoussée hors fenêtre, 70 µs sur une frame de 100 Ko. Budget 5 ms.
+
+**M1 — daemon + politique** *(fait)*
 Daemon avec socket Unix et handshake de version, `policy.yaml`, verdicts allow/deny/ask
 (le `ask` répond automatiquement `deny` en attendant l'UI), blocage propre via `isError`,
 `mcpwall init` et `restore`.
 Critère : une règle bloque une lecture de `.env` sans que la session de l'agent ne casse.
+
+- [x] `ipc.rs` — protocole + handshake de version
+- [x] `daemon.rs` — socket Unix, un seul par machine, socket en 0600
+- [x] `client.rs` — `DecisionPoint` par-dessus le socket, fail-open par défaut
+- [x] `policy.rs` — `policy.yaml`, rechargement à chaud, détection de secrets
+- [x] `setup.rs` — `init` avec diff et sauvegardes, `restore`
 
 **M2 — app macOS**
 Menu bar, popover, panneau de décision, fenêtre journal, onboarding graphique,
@@ -471,3 +482,31 @@ abandonnait sur le premier `\` ; un `id` contenant `\"` suffisait alors à sorti
 **2026-07-27 — `Oversize` resynchronise, ne tue pas la connexion.** Le découpeur signale
 et repart ; la décision de fatalité appartient à la couche transport. C'est le même
 mécanisme qui absorbe un serveur violant la règle du retour ligne.
+
+**2026-07-27 — Le plafond de frame ne s'appliquait qu'en l'absence de délimiteur.** Une
+frame surdimensionnée arrivant d'un seul `read()` passait donc au travers : la valeur
+effective du plafond dépendait du découpage des lectures. Trouvé par un test d'invariant
+rejoué sur plusieurs tailles de morceaux, pas par un test de cas.
+
+**2026-07-27 — Le point de décision est faillible.** `DecisionPoint::decide` rend un
+`Result`. Sans ça, un client de socket ne pourrait signaler « daemon injoignable »
+qu'en mentant `Allow` ou en paniquant. Tout `Err` devient un `Allow` journalisé, sauf
+`fail_closed` explicite.
+
+**2026-07-27 — Le client du daemon vit sur un thread système, pas sur l'exécuteur.**
+Retenir une frame impose un verdict synchrone, appelé depuis une pompe async. Si l'I/O du
+socket partageait l'exécuteur, l'attente du verdict bloquerait la tâche censée le
+produire — interblocage garanti sur un runtime mono-thread.
+
+**2026-07-27 — Une politique vide est refusée.** Tous les champs ayant un défaut, un
+fichier vide se désérialisait en `default: allow` sans aucune règle : un `policy.yaml`
+tronqué désactivait le pare-feu en silence. Découvert parce qu'un test partageant un
+répertoire temporaire est devenu instable.
+
+**2026-07-27 — `init` n'injecte `--project` que là où le projet est connu.** Sous
+`projects.<dir>` de `~/.claude.json` et dans un `.mcp.json`, oui. À la racine d'un fichier
+global, non : ce serveur est utilisé depuis dix projets, et lui inventer un projet
+mentirait sur la provenance — donc débloquerait `forever` à tort.
+
+**2026-07-27 — Le daemon calcule `forever_allowed` et le transmet.** L'UI n'a pas à
+refaire le raisonnement sur la provenance, et ne peut donc pas se tromper en le refaisant.

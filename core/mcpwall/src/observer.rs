@@ -266,6 +266,13 @@ impl JournalObserver {
             .unwrap_or_else(|_| "unknown".to_owned())
     }
 
+    pub fn scope_paths(&self) -> Vec<std::path::PathBuf> {
+        self.state
+            .lock()
+            .map(|s| s.scope.resolve().paths().to_vec())
+            .unwrap_or_default()
+    }
+
     pub fn session_id(&self) -> i64 {
         self.state.lock().map(|s| s.session_id).unwrap_or(0)
     }

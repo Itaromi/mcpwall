@@ -37,9 +37,37 @@ proxy.
 
 ## État
 
-En développement, jalon M0 (observation seule). Pas encore utilisable.
+Jalons M0 et M1 faits : relais stdio, journal, daemon de politique, `init`/`restore`.
+Il n'y a **pas encore d'interface** — le panneau de décision arrive en M2, et en
+attendant une règle `ask` bloque au lieu de demander. Utilisable en ligne de commande,
+pas encore livrable à quelqu'un qui ne lit pas ce README.
 
 Voir [SPEC.md](SPEC.md) pour l'architecture, les décisions prises et leurs raisons.
+
+## Essayer
+
+```sh
+cargo build --release
+
+# 1. le daemon, qui écrit une politique par défaut au premier lancement
+./target/release/mcpwall daemon &
+
+# 2. voir ce qu'init ferait à vos configurations — rien n'est écrit sans --apply
+./target/release/mcpwall init
+
+# 3. l'appliquer, puis redémarrer vos clients MCP
+./target/release/mcpwall init --apply
+
+# 4. regarder passer le trafic
+./target/release/mcpwall log --follow
+./target/release/mcpwall log --stats
+```
+
+`mcpwall restore` remet toutes les configurations en état depuis les sauvegardes.
+
+La politique vit dans `~/.mcpwall/policy.yaml` et se recharge à chaud.
+Par défaut elle laisse tout passer sauf l'accès aux chemins de secrets et les
+identifiants repérés dans les arguments.
 
 ## Principes
 

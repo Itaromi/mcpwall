@@ -12,10 +12,12 @@ use std::sync::Arc;
 use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
 
+use mcpwall::client::{DaemonClient, SessionInfo};
 use mcpwall::journal::{self, Journal};
-use mcpwall::mcp::AllowAll;
+use mcpwall::mcp::{AllowAll, DecisionPoint};
 use mcpwall::observer::JournalObserver;
 use mcpwall::session::{SessionConfig, run};
+use mcpwall::{daemon, ipc, policy, setup};
 
 #[derive(Parser)]
 #[command(
@@ -38,6 +40,38 @@ enum Command {
     Wrap(WrapArgs),
     /// Consulte le journal.
     Log(LogArgs),
+    /// Lance le daemon de politique. Un seul par machine.
+    ///
+    /// En M2 c'est l'app macOS qui le lance et le supervise comme processus
+    /// enfant : elle ne le réimplémente pas.
+    Daemon(DaemonArgs),
+    /// Installe mcpwall dans les configurations MCP existantes.
+    Init(InitArgs),
+    /// Remet les configurations en état depuis les sauvegardes.
+    Restore,
+    /// Affiche la politique effective et vérifie sa syntaxe.
+    Policy,
+}
+
+#[derive(Args)]
+struct DaemonArgs {
+    /// Socket d'écoute.
+    #[arg(long)]
+    socket: Option<PathBuf>,
+    /// Fichier de politique. Créé avec les règles par défaut s'il manque.
+    #[arg(long)]
+    policy: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct InitArgs {
+    /// Écrit réellement. Sans ce drapeau, `init` se contente d'afficher le diff.
+    #[arg(long)]
+    apply: bool,
+
+    /// Projets supplémentaires où chercher un `.mcp.json`.
+    #[arg(long = "project", value_name = "CHEMIN")]
+    projects: Vec<PathBuf>,
 }
 
 #[derive(Args)]
@@ -50,6 +84,10 @@ struct WrapArgs {
     /// qui lance le shim.
     #[arg(long)]
     project: Option<PathBuf>,
+
+    /// Socket du daemon. Par défaut `~/.mcpwall/daemon.sock`.
+    #[arg(long)]
+    socket: Option<PathBuf>,
 
     /// Commande du serveur amont, après `--`.
     #[arg(last = true, required = true)]
@@ -92,12 +130,29 @@ fn main() -> Result<()> {
             std::process::exit(code);
         }
         Command::Log(args) => cmd_log(db, args),
+        Command::Daemon(args) => {
+            init_tracing_at("info");
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(daemon::run(
+                args.socket.unwrap_or_else(ipc::socket_path),
+                args.policy.unwrap_or_else(ipc::policy_path),
+            ))
+        }
+        Command::Init(args) => cmd_init(args),
+        Command::Restore => cmd_restore(),
+        Command::Policy => cmd_policy(),
     }
 }
 
 fn init_tracing() {
+    init_tracing_at("warn");
+}
+
+fn init_tracing_at(default: &str) {
     use tracing_subscriber::EnvFilter;
-    let filter = EnvFilter::try_from_env("MCPWALL_LOG").unwrap_or_else(|_| EnvFilter::new("warn"));
+    let filter = EnvFilter::try_from_env("MCPWALL_LOG").unwrap_or_else(|_| EnvFilter::new(default));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
@@ -129,6 +184,25 @@ async fn cmd_wrap(db: PathBuf, args: WrapArgs) -> Result<i32> {
 
     let observer = JournalObserver::new(journal.clone(), display, args.project.clone()).await;
 
+    // Le point de décision est le daemon s'il répond, sinon rien. L'absence de
+    // daemon dégrade en observation seule : c'est la règle de disponibilité §4,
+    // et c'est ce qui permet de fermer l'app sans paralyser les serveurs MCP.
+    let socket = args.socket.clone().unwrap_or_else(ipc::socket_path);
+    let decision: Arc<dyn DecisionPoint> = match DaemonClient::connect(
+        &socket,
+        false,
+        SessionInfo {
+            scope_key: observer.scope_key(),
+            scope_source: observer.scope_source().as_str().to_owned(),
+            scope_paths: observer.scope_paths(),
+            server: None,
+            session_id: observer.session_id(),
+        },
+    ) {
+        Some(c) => Arc::new(c),
+        None => Arc::new(AllowAll),
+    };
+
     let mut config = SessionConfig::new(program, rest);
     config.project = args.project;
 
@@ -137,7 +211,7 @@ async fn cmd_wrap(db: PathBuf, args: WrapArgs) -> Result<i32> {
         tokio::io::stdin(),
         tokio::io::stdout(),
         observer.clone(),
-        Arc::new(AllowAll),
+        decision,
     )
     .await?;
 
@@ -244,4 +318,100 @@ fn hhmmss(ms: i64) -> String {
     let secs = ms / 1000;
     let (h, m, s) = ((secs / 3600) % 24, (secs / 60) % 60, secs % 60);
     format!("{h:02}:{m:02}:{s:02}")
+}
+
+// ---------------------------------------------------------------------------
+// Onboarding
+// ---------------------------------------------------------------------------
+
+fn cmd_init(args: InitArgs) -> Result<()> {
+    // Le lien symbolique d'abord : les configs doivent pointer vers lui, jamais
+    // vers le chemin du bundle, sinon déplacer l'app casse tout.
+    let exe = std::env::current_exe()?;
+    let shim = setup::ensure_shim_link(&exe)?;
+    println!("shim  {} -> {}", shim.display(), exe.display());
+
+    let targets = setup::discover(&args.projects);
+    if targets.is_empty() {
+        println!("\naucune configuration MCP trouvée.");
+        return Ok(());
+    }
+
+    let mut plans = Vec::new();
+    for t in &targets {
+        match setup::plan(t, &shim) {
+            Ok(p) => plans.push(p),
+            Err(e) => println!("\n{}  ignoré : {e}", t.path.display()),
+        }
+    }
+
+    let mut total = 0;
+    for p in &plans {
+        if p.is_noop() {
+            if !p.already.is_empty() {
+                println!(
+                    "\n{}  déjà enveloppé ({})",
+                    p.path.display(),
+                    p.already.len()
+                );
+            }
+            continue;
+        }
+        total += p.wrapped.len();
+        println!("\n{}  [{}]", p.path.display(), p.kind.label());
+        println!("  serveurs : {}", p.wrapped.join(", "));
+        for line in setup::diff(&p.before, &p.after).lines() {
+            println!("  {line}");
+        }
+    }
+
+    if total == 0 {
+        println!("\nrien à faire.");
+        return Ok(());
+    }
+
+    if !args.apply {
+        // Rien n'est écrit sans que le diff ait été montré et accepté.
+        println!("\n{total} serveur(s) à envelopper. Relancez avec --apply pour écrire.");
+        return Ok(());
+    }
+
+    for p in &plans {
+        if p.is_noop() {
+            continue;
+        }
+        let backup = setup::apply(p)?;
+        println!(
+            "écrit  {}  (sauvegarde {})",
+            p.path.display(),
+            backup.display()
+        );
+    }
+
+    println!("\nRedémarrez vos clients MCP pour que la nouvelle configuration prenne effet.");
+    println!("`mcpwall restore` remet tout en état.");
+    Ok(())
+}
+
+fn cmd_restore() -> Result<()> {
+    let restored = setup::restore()?;
+    if restored.is_empty() {
+        println!("aucune sauvegarde trouvée.");
+        return Ok(());
+    }
+    for p in restored {
+        println!("restauré  {}", p.display());
+    }
+    Ok(())
+}
+
+fn cmd_policy() -> Result<()> {
+    let path = ipc::policy_path();
+    let policy = policy::Policy::load_or_create(&path)?;
+    println!("politique      {}", path.display());
+    println!("défaut         {}", policy.default_action().as_str());
+    println!("fail_closed    {}", policy.fail_closed());
+    println!("ask_timeout    {:?}", policy.ask_timeout());
+    println!("\nsyntaxe valide.");
+    Ok(())
 }
