@@ -90,8 +90,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         popover = NSPopover()
         popover.behavior = .transient
-        popover.contentSize = NSSize(width: 320, height: 420)
-        popover.contentViewController = NSHostingController(
+
+        // No hard-coded `contentSize`: the size comes from SwiftUI, and
+        // `sizingOptions` is what makes that happen. Without it the hosting
+        // controller never publishes a `preferredContentSize`, so NSPopover
+        // does its geometry against whatever `contentSize` was last set —
+        // a frame the content does not fill, which detaches the bubble from
+        // the menu bar instead of hanging it under the icon.
+        let controller = NSHostingController(
             rootView: PopoverView(model: model, actions: PopoverActions(
                 openJournal: { [weak self] in self?.showJournal() },
                 openPolicy: { NSWorkspace.shared.open(Paths.policy) },
@@ -99,6 +105,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 quit: { NSApp.terminate(nil) }
             ))
         )
+        controller.sizingOptions = [.preferredContentSize]
+        popover.contentViewController = controller
     }
 
     /// Template image icon: macOS inverts it automatically for light and dark
