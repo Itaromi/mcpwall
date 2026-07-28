@@ -355,14 +355,28 @@ fn cmd_init(args: InitArgs) -> Result<()> {
                     p.already.len()
                 );
             }
+            report_uncovered(p);
             continue;
         }
         total += p.wrapped.len();
         println!("\n{}  [{}]", p.path.display(), p.kind.label());
         println!("  servers: {}", p.wrapped.join(", "));
+        report_uncovered(p);
         for line in setup::diff(&p.before, &p.after).lines() {
             println!("  {line}");
         }
+    }
+
+    // Said once more at the end, and said in full. Per-file lines scroll away
+    // behind the diffs; the number of servers left unprotected is the one thing
+    // the user must not miss.
+    let uncovered: Vec<_> = plans.iter().flat_map(|p| p.uncovered.iter()).collect();
+    if !uncovered.is_empty() {
+        println!("\n{} server(s) NOT covered by mcpwall:", uncovered.len());
+        for u in &uncovered {
+            println!("  {}  — {}", u.name, u.reason);
+        }
+        println!("  Their traffic goes straight through. See the coverage table in the README.");
     }
 
     if total == 0 {
@@ -387,6 +401,15 @@ fn cmd_init(args: InitArgs) -> Result<()> {
     println!("\nRestart your MCP clients for the new configuration to take effect.");
     println!("`mcpwall restore` puts everything back.");
     Ok(())
+}
+
+/// Names the servers a file leaves unprotected, next to the ones it protects.
+/// An absence from the `servers:` line reads as "nothing else here", which is
+/// exactly the wrong conclusion.
+fn report_uncovered(p: &setup::Plan) {
+    for u in &p.uncovered {
+        println!("  not covered: {}  ({})", u.name, u.reason);
+    }
 }
 
 fn cmd_restore() -> Result<()> {

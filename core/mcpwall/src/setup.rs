@@ -126,6 +126,16 @@ pub struct Plan {
     pub after: String,
     pub wrapped: Vec<String>,
     pub already: Vec<String>,
+    pub uncovered: Vec<Uncovered>,
+}
+
+/// A server left unprotected, and why. Carried all the way to the output so
+/// that a coverage hole is something the user reads, not something they have to
+/// deduce from an absence.
+#[derive(Debug)]
+pub struct Uncovered {
+    pub name: String,
+    pub reason: &'static str,
 }
 
 impl Plan {
@@ -143,6 +153,7 @@ pub fn plan(target: &Target, shim: &Path) -> Result<Plan> {
 
     let mut wrapped = Vec::new();
     let mut already = Vec::new();
+    let mut uncovered = Vec::new();
 
     // `~/.claude.json` carries servers at the root *and* per project. The two
     // locations are handled one after the other rather than collected: two
@@ -163,6 +174,10 @@ pub fn plan(target: &Target, shim: &Path) -> Result<Plan> {
                 match wrap_entry(cfg, shim, Some(&project)) {
                     WrapResult::Wrapped => wrapped.push(name.clone()),
                     WrapResult::Already => already.push(name.clone()),
+                    WrapResult::Uncovered(reason) => uncovered.push(Uncovered {
+                        name: name.clone(),
+                        reason,
+                    }),
                     WrapResult::Skipped => {}
                 }
             }
@@ -174,6 +189,10 @@ pub fn plan(target: &Target, shim: &Path) -> Result<Plan> {
             match wrap_entry(cfg, shim, target.project.as_deref()) {
                 WrapResult::Wrapped => wrapped.push(name.clone()),
                 WrapResult::Already => already.push(name.clone()),
+                WrapResult::Uncovered(reason) => uncovered.push(Uncovered {
+                    name: name.clone(),
+                    reason,
+                }),
                 WrapResult::Skipped => {}
             }
         }
@@ -188,12 +207,18 @@ pub fn plan(target: &Target, shim: &Path) -> Result<Plan> {
         after,
         wrapped,
         already,
+        uncovered,
     })
 }
 
 enum WrapResult {
     Wrapped,
     Already,
+    /// A real server that mcpwall cannot protect yet. Reported, never silently
+    /// dropped: a user who believes a server is behind the firewall when it is
+    /// not is worse off than a user with no firewall at all.
+    Uncovered(&'static str),
+    /// Not a server entry we recognise at all.
     Skipped,
 }
 
@@ -205,12 +230,16 @@ fn wrap_entry(cfg: &mut Value, shim: &Path, project: Option<&Path>) -> WrapResul
     };
 
     // HTTP/SSE servers have no command to wrap: the HTTP transport lands in
-    // M3.
+    // M3. Until then they are declared uncovered, by the presence of a `url`
+    // — the one field both HTTP transports share.
     let Some(command) = obj
         .get("command")
         .and_then(Value::as_str)
         .map(str::to_owned)
     else {
+        if obj.contains_key("url") {
+            return WrapResult::Uncovered("HTTP/SSE transport, not intercepted yet");
+        }
         return WrapResult::Skipped;
     };
 

@@ -336,6 +336,20 @@ pub struct CallContext<'a> {
 /// M1 would be an `unwrap` in disguise on the shim's path.
 pub trait DecisionPoint: Send + Sync {
     fn decide(&self, ctx: &CallContext<'_>) -> Result<Verdict, DecisionError>;
+
+    /// Hands over a frame coming back **down** from the server.
+    ///
+    /// Taint tracking needs what a read returned, and only the downward pump
+    /// sees it. The two pumps already share this object, so the response
+    /// travels through the trait rather than through new shared state threaded
+    /// across `wrap.rs`.
+    ///
+    /// Default: no-op. Observation-only mode and the tests keep the M0
+    /// behaviour without knowing this exists.
+    ///
+    /// **Never blocks and never fails.** A response is already on its way to
+    /// the agent; there is nothing left to decide, only to record.
+    fn observe_response(&self, _frame: &[u8]) {}
 }
 
 /// The decision point could not rule. Never fatal.

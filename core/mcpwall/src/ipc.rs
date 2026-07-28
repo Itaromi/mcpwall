@@ -89,6 +89,28 @@ pub enum ClientMessage {
     Answer(Answer),
     /// The UI asks for current state (the popover counters).
     Status,
+    /// The shim reports what a local read returned, as fingerprints.
+    ///
+    /// **Fire and forget: the daemon never answers this one.** The shim's IPC
+    /// thread reads exactly one line per message it expects a reply to; a reply
+    /// here would be consumed as the verdict of the *next* call. It is also the
+    /// right shape on the merits — a read must never wait on the firewall to
+    /// reach the agent.
+    Taint(TaintReport),
+}
+
+/// Fingerprints of one local read, on their way to the daemon's taint store.
+///
+/// Hashes, never content. The shim fingerprints and the daemon only ever
+/// compares: the secret itself does not cross the socket, and the daemon cannot
+/// leak what it never received.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaintReport {
+    /// What was read — a path where we have one, otherwise the tool name.
+    /// Shown to the user when a refusal cites it.
+    pub origin: String,
+    pub ngrams: Vec<u64>,
+    pub tokens: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

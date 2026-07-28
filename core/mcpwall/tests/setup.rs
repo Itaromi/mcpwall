@@ -264,9 +264,10 @@ fn applying_twice_does_not_wrap_twice() {
 }
 
 #[test]
-fn an_http_server_is_skipped() {
+fn an_http_server_is_left_alone_but_reported() {
     // No `command` to wrap: the HTTP transport lands in M3, and we do not
-    // pretend to cover it in the meantime.
+    // pretend to cover it in the meantime. What we must not do is stay silent:
+    // a server missing from the output reads as a server that is not there.
     let dir = tmpdir("http");
     let path = write_config(
         &dir,
@@ -279,6 +280,64 @@ fn an_http_server_is_skipped() {
     assert_eq!(
         parsed(&p)["mcpServers"]["remote"]["url"],
         "https://example.com/mcp"
+    );
+    assert_eq!(
+        p.uncovered
+            .iter()
+            .map(|u| u.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["remote"],
+        "an unprotected server must be named, not silently dropped"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_legacy_sse_transport_is_reported_too() {
+    // The deprecated transport is still widely deployed. It is recognised by
+    // its `url`, the one field both HTTP transports share, so a server declared
+    // without an explicit `type` is not missed.
+    let dir = tmpdir("sse");
+    let path = write_config(
+        &dir,
+        ".mcp.json",
+        &json!({"mcpServers": {
+            "legacy": {"type": "sse", "url": "https://example.com/sse"},
+            "typeless": {"url": "https://example.com/mcp"},
+        }}),
+    );
+
+    let p = plan_for(&path, Kind::ProjectMcp, None);
+    let mut names: Vec<_> = p.uncovered.iter().map(|u| u.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, vec!["legacy", "typeless"]);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_wrapped_server_is_never_reported_as_uncovered() {
+    // The two lists must not overlap: a server that is behind mcpwall and also
+    // announced as unprotected would destroy any trust in the output.
+    let dir = tmpdir("mixed");
+    let path = write_config(
+        &dir,
+        ".mcp.json",
+        &json!({"mcpServers": {
+            "local": {"command": "node", "args": ["s.js"]},
+            "remote": {"type": "http", "url": "https://example.com/mcp"},
+        }}),
+    );
+
+    let p = plan_for(&path, Kind::ProjectMcp, None);
+    assert_eq!(p.wrapped, vec!["local"]);
+    assert_eq!(
+        p.uncovered
+            .iter()
+            .map(|u| u.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["remote"]
     );
 
     let _ = std::fs::remove_dir_all(&dir);

@@ -17,16 +17,20 @@
 //! I/O, and the conversation goes through `std` channels. The relay blocks its
 //! thread, the socket makes progress on its own.
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
+use std::sync::{Mutex, mpsc};
 use std::time::Duration;
 
-use crate::ipc::{ClientMessage, DecideRequest, DecideResponse, Hello, Outcome, ServerMessage};
+use crate::ipc::{
+    ClientMessage, DecideRequest, DecideResponse, Hello, Outcome, ServerMessage, TaintReport,
+};
 use crate::mcp::{CallContext, DecisionError, DecisionPoint, Verdict};
 use crate::scope::Scope;
+use crate::taint;
 
 /// How long to wait for a verdict when the daemon announces nothing.
 ///
@@ -44,10 +48,30 @@ const FALLBACK_TIMEOUT: Duration = Duration::from_secs(180);
 /// transit and scheduling, not the user's hesitation.
 const TIMEOUT_MARGIN: Duration = Duration::from_secs(30);
 
-type Pending = (DecideRequest, mpsc::Sender<Option<DecideResponse>>);
+/// What the IPC thread may be asked to send.
+///
+/// Two shapes, and the difference is load-bearing: `Decide` consumes exactly
+/// one reply line, `Taint` consumes none. Mixing them up would make a shim read
+/// one verdict behind for the rest of the session.
+enum Outgoing {
+    Decide(Box<DecideRequest>, mpsc::Sender<Option<DecideResponse>>),
+    Taint(Box<TaintReport>),
+}
+
+/// Ceiling on the reads awaiting their response.
+///
+/// A server that never answers must not turn this map into a leak for the life
+/// of the session.
+const MAX_INFLIGHT_READS: usize = 256;
 
 pub struct DaemonClient {
-    tx: mpsc::Sender<Pending>,
+    tx: mpsc::Sender<Outgoing>,
+    /// `id` of a local read → what it was reading.
+    ///
+    /// Filled in on the way up, consumed on the way down. Without it a response
+    /// is an anonymous blob: we would not know whether it is worth
+    /// fingerprinting, nor what to name as the origin when a refusal cites it.
+    inflight_reads: Mutex<HashMap<String, String>>,
     /// Has the daemon already been judged unreachable?
     ///
     /// A shim that has lost the daemon does not retry on every call: that would
@@ -140,16 +164,31 @@ impl DaemonClient {
             .unwrap_or(FALLBACK_TIMEOUT);
         stream_ref.set_read_timeout(Some(timeout)).ok()?;
 
-        let (tx, rx) = mpsc::channel::<Pending>();
+        let (tx, rx) = mpsc::channel::<Outgoing>();
 
         // A single thread owns the connection: requests are serialised
         // naturally, with no lock.
         std::thread::Builder::new()
             .name("mcpwall-ipc".into())
             .spawn(move || {
-                for (req, reply) in rx {
+                for outgoing in rx {
+                    let (req, reply) = match outgoing {
+                        Outgoing::Decide(req, reply) => (req, reply),
+                        // Fire and forget. A failed write is not fatal: losing a
+                        // taint report costs us a later detection, it does not
+                        // cost the user their session.
+                        Outgoing::Taint(report) => {
+                            let msg = ClientMessage::Taint(*report);
+                            if let Ok(payload) = serde_json::to_string(&msg) {
+                                let _ = writeln!(write, "{payload}");
+                                let _ = write.flush();
+                            }
+                            continue;
+                        }
+                    };
+
                     let response = (|| {
-                        let msg = ClientMessage::Decide(Box::new(req));
+                        let msg = ClientMessage::Decide(req);
                         let payload = serde_json::to_string(&msg).ok()?;
                         writeln!(write, "{payload}").ok()?;
                         write.flush().ok()?;
@@ -182,6 +221,7 @@ impl DaemonClient {
 
         Some(Self {
             tx,
+            inflight_reads: Mutex::new(HashMap::new()),
             degraded: AtomicBool::new(false),
             fail_closed,
             session,
@@ -195,6 +235,48 @@ impl DaemonClient {
 
     pub fn is_degraded(&self) -> bool {
         self.degraded.load(Ordering::Relaxed)
+    }
+
+    /// Remembers that this `id` is a local read, so its response can be
+    /// recognised on the way back down.
+    ///
+    /// The origin is the path when the arguments carry one, otherwise the tool
+    /// name: a refusal that says only "tainted data" tells the user nothing
+    /// they can act on.
+    fn note_if_local_read(&self, ctx: &CallContext<'_>) {
+        let v: serde_json::Value = match serde_json::from_slice(ctx.frame) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let params = v.get("params");
+        let tool = params.and_then(|p| p.get("name")).and_then(|n| n.as_str());
+
+        if !taint::is_local_read(ctx.method, tool) {
+            return;
+        }
+        let Some(id) = frame_id(ctx.frame) else {
+            return; // a notification: no response will come back
+        };
+
+        let origin = params
+            .and_then(|p| {
+                p.get("uri")
+                    .or_else(|| p.get("arguments").and_then(|a| a.get("path")))
+            })
+            .and_then(|s| s.as_str())
+            .map(str::to_owned)
+            .or_else(|| tool.map(str::to_owned))
+            .unwrap_or_else(|| ctx.method.to_owned());
+
+        if let Ok(mut m) = self.inflight_reads.lock() {
+            // A server that never answers must not grow this map for the life
+            // of the session. Dropping the oldest entries loses a detection,
+            // never a session.
+            if m.len() >= MAX_INFLIGHT_READS {
+                m.clear();
+            }
+            m.insert(id, origin);
+        }
     }
 
     fn error(&self, reason: &str) -> DecisionError {
@@ -221,8 +303,10 @@ impl DecisionPoint for DaemonClient {
             session_id: self.session.session_id,
         };
 
+        self.note_if_local_read(ctx);
+
         let (tx, rx) = mpsc::channel();
-        if self.tx.send((req, tx)).is_err() {
+        if self.tx.send(Outgoing::Decide(Box::new(req), tx)).is_err() {
             self.degraded.store(true, Ordering::Relaxed);
             return Err(self.error("connection to the daemon closed"));
         }
@@ -247,11 +331,53 @@ impl DecisionPoint for DaemonClient {
             },
         })
     }
+
+    fn observe_response(&self, frame: &[u8]) {
+        // Only responses to a read we marked on the way up are of interest.
+        // Everything else — `tools/list` and its kilobytes of schemas, ordinary
+        // results — is dropped before anything is parsed twice.
+        let Some(id) = frame_id(frame) else {
+            return;
+        };
+        let Some(origin) = self
+            .inflight_reads
+            .lock()
+            .ok()
+            .and_then(|mut m| m.remove(&id))
+        else {
+            return;
+        };
+
+        let fp = taint::fingerprint(&String::from_utf8_lossy(frame)).capped();
+        if fp.is_empty() {
+            return;
+        }
+
+        let _ = self.tx.send(Outgoing::Taint(Box::new(TaintReport {
+            origin,
+            ngrams: fp.ngrams,
+            tokens: fp.tokens,
+        })));
+    }
 }
 
 impl DaemonClient {
     /// Effective timeout, derived from the daemon's hello.
     pub fn decide_timeout(&self) -> Duration {
         self.timeout
+    }
+}
+
+/// `id` of a frame, rendered as text.
+///
+/// Numbers and strings are both legal JSON-RPC ids, and a server is free to
+/// echo `1` where the client sent `"1"`. Normalising to text keeps the two ends
+/// of the correlation comparable.
+fn frame_id(frame: &[u8]) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_slice(frame).ok()?;
+    match v.get("id")? {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
     }
 }

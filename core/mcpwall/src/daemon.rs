@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -21,6 +22,7 @@ use crate::ipc::{
 };
 use crate::policy::{Action, Decision, Policy, request_from_frame};
 use crate::scope::{Scope, ScopeSource};
+use crate::taint::{Fingerprint, TaintStore, fingerprint};
 
 /// Capacity of the broadcast channel towards the UIs.
 ///
@@ -59,6 +61,13 @@ pub struct Daemon {
     prompts: broadcast::Sender<ServerMessage>,
     next_prompt_id: AtomicU64,
     journal_db: PathBuf,
+    /// Fingerprints of recent local reads, all sessions together.
+    ///
+    /// Deliberately shared rather than per-session: reading in one project and
+    /// exfiltrating from another is the interesting case, and a per-session
+    /// store would be blind to exactly it. It holds hashes only, never content,
+    /// and everything ages out after `taint::TTL`.
+    taint: Mutex<TaintStore>,
 }
 
 impl Daemon {
@@ -71,6 +80,7 @@ impl Daemon {
             prompts,
             next_prompt_id: AtomicU64::new(1),
             journal_db,
+            taint: Mutex::new(TaintStore::new()),
         })
     }
 
@@ -188,13 +198,20 @@ impl Daemon {
                         continue;
                     }
                     subscribed = true;
-                    self.state.lock().await.subscribers += 1;
-                    tracing::info!("interface connected");
 
                     // Prompts go out on a dedicated task: the daemon must
                     // never wait for a UI to read before it can carry on
                     // serving the shims.
+                    //
+                    // The receiver is created *before* the interface is
+                    // counted: a broadcast only reaches receivers that already
+                    // existed when it was sent. Counting first would open a
+                    // window where a prompt is judged answerable, sent, and
+                    // received by nobody — the shim then waits out the whole
+                    // ask timeout for an answer that cannot come.
                     let mut rx = self.prompts.subscribe();
+                    self.state.lock().await.subscribers += 1;
+                    tracing::info!("interface connected");
                     let w = write.clone();
                     tokio::spawn(async move {
                         while let Ok(msg) = rx.recv().await {
@@ -203,6 +220,22 @@ impl Daemon {
                             }
                         }
                     });
+                }
+
+                ClientMessage::Taint(report) => {
+                    // No reply: the shim reads one line per message it expects
+                    // an answer to, and an unexpected line here would be
+                    // consumed as the verdict of its next call.
+                    let fp = Fingerprint {
+                        ngrams: report.ngrams,
+                        tokens: report.tokens,
+                    };
+                    if !fp.is_empty() {
+                        self.taint
+                            .lock()
+                            .await
+                            .record(&fp, &report.origin, Instant::now());
+                    }
                 }
 
                 ClientMessage::Answer(answer) => {
@@ -247,6 +280,21 @@ impl Daemon {
             let mut request =
                 request_from_frame(&req.method, req.frame.as_bytes(), &scope, &mut tool_buf);
             request.scope_key = &req.scope_key;
+
+            // Is anything about to leave that was read from this machine?
+            // Checked before evaluation so the rule sees a fact, not a
+            // callback. The store is skipped entirely when empty, which is the
+            // common case: no read, no cost on the hot path.
+            request.tainted = {
+                let store = self.taint.lock().await;
+                if store.is_empty() {
+                    None
+                } else {
+                    store
+                        .overlap(&fingerprint(&request.values.join(" ")), Instant::now())
+                        .map(|m| m.origin)
+                }
+            };
 
             let decision = policy.evaluate(&request);
             let tool = request.tool.map(str::to_owned);

@@ -133,6 +133,16 @@ pub struct PolicyFile {
     pub fail_closed: bool,
     #[serde(default = "default_ask_timeout")]
     pub ask_timeout_seconds: u64,
+    /// Tool names treated as outbound by `tool_is_outbound`.
+    ///
+    /// Configurable because no fixed list can know the user's servers. The
+    /// spec's own list included `*create*`; it is left out here. On a
+    /// filesystem server it matches `create_directory` and `create_file`, and
+    /// the rule that uses this predicate **denies** — a false positive would
+    /// block ordinary work, which §6 forbids more firmly than it forbids a
+    /// miss.
+    #[serde(default = "default_outbound_tools")]
+    pub outbound_tools: Vec<String>,
     #[serde(default)]
     pub rules: Vec<Rule>,
     #[serde(default)]
@@ -143,12 +153,31 @@ fn default_ask_timeout() -> u64 {
     60
 }
 
+fn default_outbound_tools() -> Vec<String> {
+    [
+        "*post*",
+        "*send*",
+        "*fetch*",
+        "*http*",
+        "*upload*",
+        "*publish*",
+        "*mail*",
+        "*webhook*",
+        "*request*",
+        "*curl*",
+    ]
+    .iter()
+    .map(|s| (*s).to_owned())
+    .collect()
+}
+
 impl Default for PolicyFile {
     fn default() -> Self {
         Self {
             default: Action::Allow,
             fail_closed: false,
             ask_timeout_seconds: default_ask_timeout(),
+            outbound_tools: default_outbound_tools(),
             rules: Vec::new(),
             overrides: Vec::new(),
         }
@@ -165,6 +194,20 @@ pub const DEFAULT_POLICY_YAML: &str = r#"# mcpwall policy.
 default: allow
 fail_closed: false
 ask_timeout_seconds: 60
+
+# Tools that send data off the machine. Add your own here: no built-in list can
+# know the names your servers use.
+outbound_tools:
+  - "*post*"
+  - "*send*"
+  - "*fetch*"
+  - "*http*"
+  - "*upload*"
+  - "*publish*"
+  - "*mail*"
+  - "*webhook*"
+  - "*request*"
+  - "*curl*"
 
 rules:
   # Reading a local secret. High confidence: these paths are not read by
@@ -200,7 +243,10 @@ rules:
     severity: medium
     message: "write outside the project"
 
-  # M3: requires taint tracking, inactive for now.
+  # Local data read in the last ten minutes, on its way out through a tool that
+  # leaves the machine. This is the rule the whole product exists for, and the
+  # only one that denies outright rather than asking: there is no legitimate
+  # reading of a secret being posted to the network.
   - id: taint_exfil
     when:
       arg_contains_tainted: true
@@ -236,6 +282,8 @@ pub struct Policy {
     file: PolicyFile,
     rules: Vec<CompiledRule>,
     overrides: Vec<(Override, Option<GlobSet>)>,
+    /// Tool names considered outbound, compiled once.
+    outbound: Option<GlobSet>,
     /// File mtime at load time, for hot reloading.
     loaded_mtime: Option<SystemTime>,
     path: Option<PathBuf>,
@@ -298,10 +346,13 @@ impl Policy {
             .map(|o| (o.clone(), build_globs(std::slice::from_ref(&o.tool))))
             .collect();
 
+        let outbound = build_globs(&file.outbound_tools);
+
         Self {
             file,
             rules,
             overrides,
+            outbound,
             loaded_mtime: mtime,
             path,
         }
@@ -389,6 +440,17 @@ impl Policy {
         }
     }
 
+    /// Does this tool send data off the machine?
+    ///
+    /// An unnamed tool is never outbound: `tool_is_outbound` must not fire on a
+    /// method that has no tool at all.
+    fn is_outbound(&self, tool: Option<&str>) -> bool {
+        let (Some(t), Some(g)) = (tool, &self.outbound) else {
+            return false;
+        };
+        g.is_match(t.to_ascii_lowercase())
+    }
+
     fn try_rule(
         &self,
         c: &CompiledRule,
@@ -436,11 +498,18 @@ impl Policy {
             return None;
         }
 
-        // M3. As long as taint tracking does not exist, these conditions are
-        // never true — so a rule carrying them never fires. That is
-        // deliberate: an inert rule visible in the file beats an absent rule we
-        // would forget to write.
-        if w.arg_contains_tainted || w.tool_is_outbound || w.tool_description_drift {
+        if w.arg_contains_tainted && req.tainted.is_none() {
+            return None;
+        }
+
+        if w.tool_is_outbound && !self.is_outbound(req.tool) {
+            return None;
+        }
+
+        // Still M3. Description drift does not exist yet, so a rule carrying
+        // it never fires — an inert rule visible in the file beats an absent
+        // rule we would forget to write.
+        if w.tool_description_drift {
             return None;
         }
 
@@ -514,6 +583,9 @@ pub struct Request<'a> {
     pub paths: Vec<String>,
     /// Textual values of the arguments, for secret detection.
     pub values: Vec<String>,
+    /// Origin of the local data recognised in the arguments, when the taint
+    /// store found any. Filled in by the daemon, which alone holds the store.
+    pub tainted: Option<String>,
     pub scope_key: &'a str,
     pub scope_paths: &'a [PathBuf],
 }
@@ -569,6 +641,9 @@ pub fn request_from_frame<'a>(
         tool: (!tool_buf.is_empty()).then_some(tool_buf.as_str()),
         paths,
         values,
+        // Only the daemon holds the taint store; a request built from a frame
+        // alone cannot know, and must not claim otherwise.
+        tainted: None,
         scope_key: "",
         scope_paths: scope.paths(),
     }
