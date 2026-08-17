@@ -30,6 +30,10 @@ name = "normal"
 path = "testservers/normal.rs"
 
 [[bin]]
+name = "leaky"
+path = "testservers/leaky.rs"
+
+[[bin]]
 name = "silent"
 path = "testservers/silent.rs"
 

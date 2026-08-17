@@ -681,12 +681,24 @@ pub enum Finding {
     /// A probable secret. **We never store the value** — only its kind and a
     /// truncated prefix, per the project conventions.
     Secret { kind: &'static str, prefix: String },
+    /// Local data recognised in the arguments, and where it was read from.
+    ///
+    /// The origin is what makes a taint refusal actionable. "tainted local data
+    /// in an outbound argument" tells the user nothing they can check; naming
+    /// the `.env` the payload came from tells them whether they are looking at
+    /// an injection or at their own deliberate call. Spec §9 requires the
+    /// decision panel to show it.
+    ///
+    /// The origin is a path or a tool name — never the data itself, which the
+    /// taint store does not keep and could not give back.
+    Tainted { origin: String },
 }
 
 impl Finding {
     pub fn describe(&self) -> String {
         match self {
             Self::Secret { kind, prefix } => format!("{kind} ({prefix}…)"),
+            Self::Tainted { origin } => format!("local data read from {origin}"),
         }
     }
 }
@@ -699,6 +711,13 @@ fn collect_findings(req: &Request<'_>) -> Vec<Finding> {
         {
             out.push(f);
         }
+    }
+    // The daemon has already done the matching; all that was missing was
+    // carrying the answer as far as the person who has to decide.
+    if let Some(origin) = &req.tainted {
+        out.push(Finding::Tainted {
+            origin: origin.clone(),
+        });
     }
     out
 }
