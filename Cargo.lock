@@ -609,13 +609,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "testservers"
-version = "0.0.0"
-dependencies = [
- "serde_json",
-]
-
-[[package]]
 name = "thiserror"
 version = "2.0.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"

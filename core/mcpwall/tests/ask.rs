@@ -477,12 +477,7 @@ fn the_shim_waits_until_the_user_has_answered() {
         .arg("wrap")
         .args(["--socket".as_ref(), h.socket.as_os_str()])
         .arg("--")
-        .arg({
-            let mut p = mcpwall();
-            p.pop();
-            p.push("normal");
-            p
-        })
+        .arg(env!("CARGO_BIN_EXE_normal"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

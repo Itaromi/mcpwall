@@ -13,11 +13,22 @@ fn mcpwall() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_mcpwall"))
 }
 
+/// A fake server.
+///
+/// Located through the constant Cargo defines for each binary of this package,
+/// not by guessing a sibling of the shim: that guess silently produced a path
+/// to a binary nothing had built, and every test that starts a real process
+/// failed for a reason that had nothing to do with the product.
 fn server(name: &str) -> PathBuf {
-    let mut p = mcpwall();
-    p.pop();
-    p.push(name);
-    p
+    PathBuf::from(match name {
+        "normal" => env!("CARGO_BIN_EXE_normal"),
+        "silent" => env!("CARGO_BIN_EXE_silent"),
+        "huge" => env!("CARGO_BIN_EXE_huge"),
+        "malformed" => env!("CARGO_BIN_EXE_malformed"),
+        "dies_midmessage" => env!("CARGO_BIN_EXE_dies_midmessage"),
+        "ignores_sigterm" => env!("CARGO_BIN_EXE_ignores_sigterm"),
+        other => panic!("unknown fake server: {other}"),
+    })
 }
 
 /// A short working directory.

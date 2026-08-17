@@ -9,6 +9,46 @@ rust-version.workspace = true
 name = "mcpwall"
 path = "src/main.rs"
 
+# The fake MCP servers of the integration tests.
+#
+# They belong to this package on purpose. As a separate workspace crate their
+# binaries were never produced in `target/debug/`: Cargo only materialises a
+# package's binaries when that same package has integration tests of its own.
+# `cargo test` therefore looked green on the parser tests and failed every test
+# that starts a real process — the ones that exist precisely because no mock
+# reproduces them.
+#
+# Declared here, they are built as a matter of course whenever a test of this
+# package is built, and their path reaches the tests through
+# `CARGO_BIN_EXE_<name>` — a compile-time constant, so renaming one breaks the
+# build instead of breaking a test at runtime.
+#
+# `scripts/build-app.sh` builds `--bin mcpwall`, so none of them is shipped.
+
+[[bin]]
+name = "normal"
+path = "testservers/normal.rs"
+
+[[bin]]
+name = "silent"
+path = "testservers/silent.rs"
+
+[[bin]]
+name = "huge"
+path = "testservers/huge.rs"
+
+[[bin]]
+name = "malformed"
+path = "testservers/malformed.rs"
+
+[[bin]]
+name = "dies_midmessage"
+path = "testservers/dies_midmessage.rs"
+
+[[bin]]
+name = "ignores_sigterm"
+path = "testservers/ignores_sigterm.rs"
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true

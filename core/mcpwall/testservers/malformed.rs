@@ -3,10 +3,13 @@
 //! Blank lines, invalid JSON, CRLF terminators, and a final frame with no
 //! delimiter. None of it may interrupt the relay.
 
+#[path = "support.rs"]
+mod support;
+
 use std::io::Write;
 
 fn main() {
-    let _ = testservers::read_line();
+    let _ = support::read_line();
     let mut out = std::io::stdout().lock();
     let _ = write!(out, "\n\n");
     let _ = writeln!(out, "this is not json");

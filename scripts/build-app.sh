@@ -30,7 +30,9 @@ for target in aarch64-apple-darwin x86_64-apple-darwin; do
         echo "    target $target missing, installing"
         rustup target add "$target"
     fi
-    MCPWALL_BUILD="$BUILD_ID" cargo build --release --target "$target" -p mcpwall
+    # `--bin mcpwall`, not `-p mcpwall`: the package also declares the fake MCP
+    # servers of the integration tests, and none of them belongs in a bundle.
+    MCPWALL_BUILD="$BUILD_ID" cargo build --release --target "$target" --bin mcpwall
 done
 
 mkdir -p "$BUILD"
