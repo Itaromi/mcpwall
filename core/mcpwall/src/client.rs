@@ -48,6 +48,13 @@ const FALLBACK_TIMEOUT: Duration = Duration::from_secs(180);
 /// transit and scheduling, not the user's hesitation.
 const TIMEOUT_MARGIN: Duration = Duration::from_secs(30);
 
+/// How long a caller will wait for a taint report to reach the socket.
+///
+/// Short on purpose: losing a report costs a later detection, whereas holding
+/// up a `PostToolUse` hook costs the user their tool call. The availability rule
+/// of §4 decides that trade-off the same way here as everywhere else.
+const TAINT_ACK_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// What the IPC thread may be asked to send.
 ///
 /// Two shapes, and the difference is load-bearing: `Decide` consumes exactly
@@ -55,7 +62,14 @@ const TIMEOUT_MARGIN: Duration = Duration::from_secs(30);
 /// one verdict behind for the rest of the session.
 enum Outgoing {
     Decide(Box<DecideRequest>, mpsc::Sender<Option<DecideResponse>>),
-    Taint(Box<TaintReport>),
+    /// The optional sender is acknowledged once the report has been written and
+    /// flushed, never before.
+    ///
+    /// The shim does not use it: it lives for the whole session, so a report
+    /// still queued when the call returns will go out well before anything needs
+    /// it. The Claude Code hook is the opposite — a process that exists for one
+    /// tool call and then exits, which would take the queued report with it.
+    Taint(Box<TaintReport>, Option<mpsc::Sender<()>>),
 }
 
 /// Ceiling on the reads awaiting their response.
@@ -177,11 +191,16 @@ impl DaemonClient {
                         // Fire and forget. A failed write is not fatal: losing a
                         // taint report costs us a later detection, it does not
                         // cost the user their session.
-                        Outgoing::Taint(report) => {
+                        Outgoing::Taint(report, ack) => {
                             let msg = ClientMessage::Taint(*report);
                             if let Ok(payload) = serde_json::to_string(&msg) {
                                 let _ = writeln!(write, "{payload}");
                                 let _ = write.flush();
+                            }
+                            // After the flush, so that a caller about to exit
+                            // knows the bytes have left rather than hoping so.
+                            if let Some(ack) = ack {
+                                let _ = ack.send(());
                             }
                             continue;
                         }
@@ -353,11 +372,14 @@ impl DecisionPoint for DaemonClient {
             return;
         }
 
-        let _ = self.tx.send(Outgoing::Taint(Box::new(TaintReport {
-            origin,
-            ngrams: fp.ngrams,
-            tokens: fp.tokens,
-        })));
+        let _ = self.tx.send(Outgoing::Taint(
+            Box::new(TaintReport {
+                origin,
+                ngrams: fp.ngrams,
+                tokens: fp.tokens,
+            }),
+            None,
+        ));
     }
 }
 
@@ -365,6 +387,43 @@ impl DaemonClient {
     /// Effective timeout, derived from the daemon's hello.
     pub fn decide_timeout(&self) -> Duration {
         self.timeout
+    }
+
+    /// Records what a local read returned, outside the correlation the shim
+    /// relies on, and **waits for the report to be on the wire**.
+    ///
+    /// The shim learns an origin on the way up and pairs it with a response on
+    /// the way down, inside one long-lived process. The Claude Code hook has
+    /// neither half of that: `PreToolUse` and `PostToolUse` are two separate
+    /// processes, and the result arrives already paired with the call that
+    /// produced it. So the report is sent directly.
+    ///
+    /// Waiting is not a detail. This process exits as soon as it has written
+    /// its answer, and a report still sitting in the channel would die with it —
+    /// the taint store would stay empty, and the exfiltration that follows would
+    /// go through. The wait is bounded so a stuck daemon cannot hold up the
+    /// user's tool call.
+    pub fn report_taint(&self, origin: &str, text: &str) {
+        let fp = taint::fingerprint(text).capped();
+        if fp.is_empty() {
+            return;
+        }
+        let (ack, done) = mpsc::channel();
+        if self
+            .tx
+            .send(Outgoing::Taint(
+                Box::new(TaintReport {
+                    origin: origin.to_owned(),
+                    ngrams: fp.ngrams,
+                    tokens: fp.tokens,
+                }),
+                Some(ack),
+            ))
+            .is_err()
+        {
+            return;
+        }
+        let _ = done.recv_timeout(TAINT_ACK_TIMEOUT);
     }
 }
 

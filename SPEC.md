@@ -436,8 +436,15 @@ The exit criterion is therefore **not met**: without notarisation, Gatekeeper
 forces a right click → Open, which is exactly the friction §8 forbids.
 
 **M3 — depth**
-Claude Code hook, taint tracking, tool description drift detection, streamable
-HTTP transport, JSONL export.
+
+- [x] taint tracking — fingerprints, store, `taint_exfil` rule, origin named in
+      the refusal, and the complete attack of §11 asserted end to end
+- [x] Claude Code hook — `PreToolUse` decides, `PostToolUse` feeds the taint
+      store, `init` installs both. Verified against the current documented
+      contract (`hookSpecificOutput`, nested matcher groups), not from memory
+- [ ] tool description drift detection
+- [ ] streamable HTTP transport
+- [x] JSONL export (delivered in M2 with the journal window)
 
 ## 11. Tests
 

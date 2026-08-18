@@ -29,12 +29,16 @@ Being honest about coverage is a credibility argument.
 | --- | --- |
 | MCP servers over stdio | yes |
 | MCP servers over streamable HTTP | planned (M3) |
-| Claude Code built-in tools (`Read`, `Edit`, `Bash`, `WebFetch`) | via `PreToolUse` hook (M3) |
+| Claude Code built-in tools (`Read`, `Edit`, `Bash`, `WebFetch`) | yes — `PreToolUse` / `PostToolUse` hooks |
 | Codex built-in tools | **no** — its security model goes through the sandbox |
 | Cursor | MCP traffic only |
 
 An MCP proxy only sees MCP traffic. For Claude Code, the built-in tools are most
 of the attack surface: covering them is the hook's job, not the proxy's.
+`mcpwall init` installs it, and it answers to the same daemon, the same
+`policy.yaml` and the same journal — so `Bash` reading your `.env` and then
+`WebFetch` sending it out is blocked without an MCP server being involved at any
+point.
 
 ## Status
 

@@ -16,7 +16,7 @@ use mcpwall::journal::{self, Journal};
 use mcpwall::mcp::{AllowAll, DecisionPoint};
 use mcpwall::observer::JournalObserver;
 use mcpwall::session::{SessionConfig, run};
-use mcpwall::{daemon, ipc, policy, setup};
+use mcpwall::{daemon, hook, ipc, policy, setup};
 
 #[derive(Parser)]
 #[command(
@@ -44,6 +44,13 @@ enum Command {
     /// In M2 it is the macOS app that starts and supervises it as a child
     /// process: the app does not reimplement it.
     Daemon(DaemonArgs),
+    /// Answer a Claude Code hook. Reads one JSON object on stdin.
+    ///
+    /// Covers what MCP cannot see: the built-in `Read`, `Edit`, `Bash` and
+    /// `WebFetch` tools, which are most of the attack surface and never reach a
+    /// server. Same daemon, same policy, same journal. Never meant to be run by
+    /// hand; `mcpwall init` wires it into the settings.
+    Hook(HookArgs),
     /// Install mcpwall into the existing MCP configurations.
     Init(InitArgs),
     /// Put the configurations back from the backups.
@@ -60,6 +67,23 @@ struct DaemonArgs {
     /// Policy file. Created with the default rules if missing.
     #[arg(long)]
     policy: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct HookArgs {
+    /// Project this hook was installed for.
+    ///
+    /// Written by `mcpwall init` when it installs the hook into a project's
+    /// settings, and left out when it installs into `~/.claude/settings.json`,
+    /// which serves every project at once. Without it the scope falls back to
+    /// the `cwd` the hook reports — rank 3 of §6bis, where "always allow" is
+    /// not offered.
+    #[arg(long)]
+    project: Option<PathBuf>,
+
+    /// Daemon socket. Defaults to `~/.mcpwall/daemon.sock`.
+    #[arg(long)]
+    socket: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -140,6 +164,7 @@ fn main() -> Result<()> {
                 db,
             ))
         }
+        Command::Hook(args) => cmd_hook(args),
         Command::Init(args) => cmd_init(args),
         Command::Restore => cmd_restore(),
         Command::Policy => cmd_policy(),
@@ -321,6 +346,34 @@ fn hhmmss(ms: i64) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Claude Code hook
+// ---------------------------------------------------------------------------
+
+/// Always exits 0, always with valid stdout or none at all.
+///
+/// Exit 2 would block the tool call, and every path that reaches it here is one
+/// where mcpwall failed to have an opinion — an unparseable payload, an absent
+/// daemon, an event we do not handle. Turning our own failure into a refusal of
+/// the user's work is the one behaviour §4 rules out. The hook stays silent and
+/// lets Claude Code's ordinary permission flow proceed.
+fn cmd_hook(args: HookArgs) -> Result<()> {
+    // Diagnostics go to stderr, which Claude Code surfaces without treating it
+    // as a decision. Nothing but a verdict may ever reach stdout.
+    init_tracing();
+
+    let socket = args.socket.unwrap_or_else(ipc::socket_path);
+    let Some(input) = hook::read_input(std::io::stdin()) else {
+        tracing::warn!("unreadable hook payload, staying out of the way");
+        return Ok(());
+    };
+
+    if let Some(output) = hook::run(&input, &socket, args.project.as_deref()) {
+        println!("{output}");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Onboarding
 // ---------------------------------------------------------------------------
 
@@ -332,11 +385,6 @@ fn cmd_init(args: InitArgs) -> Result<()> {
     println!("shim  {} -> {}", shim.display(), exe.display());
 
     let targets = setup::discover(&args.projects);
-    if targets.is_empty() {
-        println!("\nno MCP configuration found.");
-        return Ok(());
-    }
-
     let mut plans = Vec::new();
     for t in &targets {
         match setup::plan(t, &shim) {
@@ -345,14 +393,36 @@ fn cmd_init(args: InitArgs) -> Result<()> {
         }
     }
 
+    // The hook is planned even when no MCP configuration was found: the
+    // built-in tools it covers exist whether or not the user has a single MCP
+    // server, and they are most of the attack surface. Returning early on "no
+    // MCP configuration" would have left the biggest hole open on exactly the
+    // machines that look like they have nothing to protect.
+    match setup::plan_hook(&setup::claude_settings_path(), &shim) {
+        Ok(p) => plans.push(p),
+        Err(e) => println!("\nClaude Code hooks skipped: {e}"),
+    }
+
+    if plans.is_empty() {
+        println!("\nnothing to configure.");
+        return Ok(());
+    }
+
     let mut total = 0;
     for p in &plans {
+        // A hook plan lists events, a configuration plan lists servers. Saying
+        // "servers: PreToolUse" would be a small lie in the one place the user
+        // is being asked to trust us with their files.
+        let noun = match p.kind {
+            setup::Kind::ClaudeHooks => "events",
+            _ => "servers",
+        };
         if p.is_noop() {
             if !p.already.is_empty() {
                 println!(
-                    "\n{}  already wrapped ({})",
+                    "\n{}  already installed ({})",
                     p.path.display(),
-                    p.already.len()
+                    p.already.join(", ")
                 );
             }
             report_uncovered(p);
@@ -360,7 +430,7 @@ fn cmd_init(args: InitArgs) -> Result<()> {
         }
         total += p.wrapped.len();
         println!("\n{}  [{}]", p.path.display(), p.kind.label());
-        println!("  servers: {}", p.wrapped.join(", "));
+        println!("  {noun}: {}", p.wrapped.join(", "));
         report_uncovered(p);
         for line in setup::diff(&p.before, &p.after).lines() {
             println!("  {line}");
@@ -386,7 +456,7 @@ fn cmd_init(args: InitArgs) -> Result<()> {
 
     if !args.apply {
         // Nothing is written before the diff has been shown and accepted.
-        println!("\n{total} server(s) to wrap. Re-run with --apply to write.");
+        println!("\n{total} change(s) to make. Re-run with --apply to write.");
         return Ok(());
     }
 

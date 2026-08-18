@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use mcpwall::setup::{Kind, Plan, Target, diff, plan};
+use mcpwall::setup::{Kind, Plan, Target, apply, diff, plan, plan_hook};
 use serde_json::{Value, json};
 
 fn tmpdir(tag: &str) -> PathBuf {
@@ -403,4 +403,162 @@ fn the_diff_shows_what_changes() {
 #[test]
 fn the_diff_of_an_unchanged_file_is_empty() {
     assert!(diff("a\nb\n", "a\nb\n").is_empty());
+}
+
+// --- The Claude Code hook ---
+//
+// The hook is what covers the built-in tools of §7, and it is installed into a
+// file mcpwall does not own: whatever else the user has wired into their
+// settings has to survive it untouched.
+
+#[test]
+fn the_hook_is_installed_on_both_events() {
+    let dir = tmpdir("hook-fresh");
+    let settings = dir.join("settings.json");
+
+    let p = plan_hook(&settings, &shim()).expect("plan");
+    assert_eq!(p.wrapped, vec!["PreToolUse", "PostToolUse"]);
+
+    let after: Value = serde_json::from_str(&p.after).expect("valid JSON");
+    let command = format!("{} hook", shim().display());
+
+    for event in ["PreToolUse", "PostToolUse"] {
+        let group = &after["hooks"][event][0];
+        assert_eq!(group["hooks"][0]["type"], "command", "{event}");
+        assert_eq!(group["hooks"][0]["command"], command, "{event}");
+    }
+
+    // Every tool may be subject to a rule; only some produce local data. The
+    // second matcher is what keeps a process from being started after each and
+    // every tool call.
+    assert_eq!(after["hooks"]["PreToolUse"][0]["matcher"], "*");
+    let post = after["hooks"]["PostToolUse"][0]["matcher"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(post.contains("Bash"), "{post}");
+    assert!(post.contains("Read"), "{post}");
+    assert!(
+        !post.contains('*'),
+        "the PostToolUse matcher must be a list: {post}"
+    );
+}
+
+#[test]
+fn existing_settings_and_existing_hooks_are_kept() {
+    // The failure this guards against is not a bug, it is an uninstall: a
+    // firewall that deletes somebody's tooling on install does not get a
+    // second chance.
+    let dir = tmpdir("hook-existing");
+    let settings = write_config(
+        &dir,
+        "settings.json",
+        &json!({
+            "model": "opus",
+            "hooks": {
+                "PreToolUse": [
+                    { "matcher": "Bash", "hooks": [{ "type": "command", "command": "/usr/local/bin/audit" }] }
+                ],
+                "Stop": [
+                    { "hooks": [{ "type": "command", "command": "/usr/local/bin/notify" }] }
+                ]
+            }
+        }),
+    );
+
+    let p = plan_hook(&settings, &shim()).expect("plan");
+    let after: Value = serde_json::from_str(&p.after).expect("valid JSON");
+
+    assert_eq!(after["model"], "opus", "unrelated settings must survive");
+    assert_eq!(
+        after["hooks"]["Stop"][0]["hooks"][0]["command"], "/usr/local/bin/notify",
+        "an unrelated event must survive"
+    );
+    assert_eq!(
+        after["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "/usr/local/bin/audit",
+        "the user's own PreToolUse hook must survive, and stay first"
+    );
+    assert_eq!(
+        after["hooks"]["PreToolUse"].as_array().map(Vec::len),
+        Some(2),
+        "ours is appended, not substituted"
+    );
+}
+
+#[test]
+fn installing_twice_does_not_install_twice() {
+    // Two copies would run the hook twice per call — and so prompt the user
+    // twice for one decision.
+    let dir = tmpdir("hook-twice");
+    let settings = dir.join("settings.json");
+
+    let first = plan_hook(&settings, &shim()).expect("plan");
+    std::fs::write(&settings, &first.after).expect("write");
+
+    let second = plan_hook(&settings, &shim()).expect("replan");
+    assert!(second.is_noop(), "{}", second.after);
+    assert_eq!(second.already, vec!["PreToolUse", "PostToolUse"]);
+}
+
+#[test]
+fn a_hook_moved_under_another_matcher_is_still_recognised() {
+    // Detection is on the command, not on the shape of the group: a user who
+    // narrowed our matcher by hand must not get a second copy on the next
+    // `init`.
+    let dir = tmpdir("hook-moved");
+    let command = format!("{} hook", shim().display());
+    let settings = write_config(
+        &dir,
+        "settings.json",
+        &json!({
+            "hooks": {
+                "PreToolUse": [
+                    { "matcher": "Bash|Read", "hooks": [{ "type": "command", "command": command }] }
+                ]
+            }
+        }),
+    );
+
+    let p = plan_hook(&settings, &shim()).expect("plan");
+    assert_eq!(
+        p.already,
+        vec!["PreToolUse"],
+        "the user's narrowed matcher must be left as they set it"
+    );
+    assert_eq!(p.wrapped, vec!["PostToolUse"]);
+}
+
+#[test]
+fn creating_the_settings_file_is_still_undoable() {
+    // `apply` writes the backup from the recorded previous content rather than
+    // copying the file, so that installing the hook on a machine with no
+    // settings at all is not the one change `mcpwall restore` cannot undo.
+    let dir = tmpdir("hook-restore");
+    let settings = dir.join("settings.json");
+    assert!(!settings.exists());
+
+    let p = plan_hook(&settings, &shim()).expect("plan");
+    let backup = apply(&p).expect("apply");
+
+    assert!(settings.exists(), "the file must have been created");
+    let restored: Value =
+        serde_json::from_str(&std::fs::read_to_string(&backup).expect("backup")).expect("json");
+    assert_eq!(
+        restored,
+        json!({}),
+        "the backup must describe a machine with no settings"
+    );
+}
+
+#[test]
+fn settings_that_are_not_an_object_are_refused_without_overwriting() {
+    let dir = tmpdir("hook-bad");
+    let settings = dir.join("settings.json");
+    std::fs::write(&settings, "[1, 2, 3]").expect("write");
+
+    assert!(plan_hook(&settings, &shim()).is_err());
+    assert_eq!(
+        std::fs::read_to_string(&settings).expect("read"),
+        "[1, 2, 3]",
+        "a refusal must leave the file exactly as it was"
+    );
 }
