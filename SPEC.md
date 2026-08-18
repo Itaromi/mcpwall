@@ -445,7 +445,12 @@ forces a right click → Open, which is exactly the friction §8 forbids.
 - [x] tool description drift detection — SHA-256 over description **and** input
       schema, recorded per server in SQLite so it survives restarts, with the
       §11 fake server that changes its story between two `tools/list` calls
-- [ ] streamable HTTP transport
+- [x] streamable HTTP transport — a loopback proxy, byte passthrough with the
+      upstream's `Content-Length` preserved, SSE relayed as a stream and
+      observed as it flows. **The availability rule of §4 cannot hold here**:
+      there is no way to interpose on a direct connection without being in the
+      path, so a stopped proxy means unreachable servers. Documented in the
+      README and in `init`'s own output rather than left to be discovered.
 - [x] JSONL export (delivered in M2 with the journal window)
 
 ## 11. Tests

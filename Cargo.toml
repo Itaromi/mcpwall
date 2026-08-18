@@ -11,6 +11,10 @@ rust-version = "1.85"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 globset = "0.4"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "client", "http1"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "webpki-roots", "ring", "tls12"] }
+hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "server", "http1"] }
 memchr = "2"
 nix = { version = "0.31", default-features = false, features = ["signal"] }
 rusqlite = { version = "0.40", features = ["bundled"] }

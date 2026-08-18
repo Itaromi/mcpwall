@@ -30,6 +30,10 @@ name = "normal"
 path = "testservers/normal.rs"
 
 [[bin]]
+name = "httpmcp"
+path = "testservers/httpmcp.rs"
+
+[[bin]]
 name = "rugpull"
 path = "testservers/rugpull.rs"
 
@@ -61,6 +65,10 @@ path = "testservers/ignores_sigterm.rs"
 anyhow.workspace = true
 clap.workspace = true
 globset.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-rustls.workspace = true
+hyper-util.workspace = true
 memchr.workspace = true
 nix.workspace = true
 rusqlite.workspace = true

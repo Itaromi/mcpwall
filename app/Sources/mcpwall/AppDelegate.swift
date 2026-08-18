@@ -25,6 +25,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var popover: NSPopover!
     private var connection: DaemonConnection!
     private var supervisor: DaemonSupervisor!
+    /// The streamable HTTP proxy. Started unconditionally: it reads its own
+    /// route table and listens with no route at all when `init` has not written
+    /// one yet, which is cheaper than teaching the app when it is needed.
+    private var proxySupervisor: DaemonSupervisor!
     private var panels: DecisionPanelController!
     private var journalWindow: NSWindow?
     private var onboardingWindow: NSWindow?
@@ -60,6 +64,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let binary = embeddedBinary()
         supervisor = DaemonSupervisor(binary: binary)
         supervisor.start()
+        proxySupervisor = DaemonSupervisor(binary: binary, subcommand: "proxy")
+        proxySupervisor.start()
 
         panels = DecisionPanelController { [weak self] id, allow, until in
             self?.connection.answer(promptID: id, allow: allow, until: until)
@@ -89,6 +95,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The daemon is a child of this app: leaving it behind would be exactly
         // the orphan we criticise others for.
         supervisor?.stop()
+        proxySupervisor?.stop()
     }
 
     // MARK: - Menu bar

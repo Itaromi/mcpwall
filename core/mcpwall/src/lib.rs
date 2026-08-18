@@ -5,6 +5,7 @@ pub mod daemon;
 pub mod drift;
 pub mod frame;
 pub mod hook;
+pub mod http;
 pub mod ipc;
 pub mod journal;
 pub mod mcp;

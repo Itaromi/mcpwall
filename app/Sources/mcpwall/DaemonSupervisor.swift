@@ -1,20 +1,28 @@
 import Foundation
 
-/// Starts and supervises `mcpwall daemon`.
+/// Starts and supervises one long-lived `mcpwall` subcommand.
 ///
-/// The app **does not reimplement** the daemon: it hosts it as a child process.
-/// One source of truth for the policy and the decisions, and the core stays
-/// portable beyond macOS.
+/// The app **does not reimplement** anything it hosts: the daemon and the HTTP
+/// proxy are child processes. One source of truth for the policy and the
+/// decisions, and the core stays portable beyond macOS.
+///
+/// Two of these run. The daemon can be absent without breaking a session — the
+/// shims fail open. The proxy cannot: MCP clients have been pointed at its URL,
+/// so while it is down the servers routed through it are unreachable. Same
+/// supervision either way; the difference is what it costs when it fails, and
+/// it is why the proxy is supervised at all rather than started on demand.
 final class DaemonSupervisor: @unchecked Sendable {
     private let binary: URL
+    private let subcommand: String
     private var process: Process?
     private let queue = DispatchQueue(label: "mcpwall.supervisor")
     private var stopping = false
     private var restarts = 0
     private var lastStart = Date.distantPast
 
-    init(binary: URL) {
+    init(binary: URL, subcommand: String = "daemon") {
         self.binary = binary
+        self.subcommand = subcommand
     }
 
     var isRunning: Bool { process?.isRunning ?? false }
@@ -23,7 +31,7 @@ final class DaemonSupervisor: @unchecked Sendable {
         queue.async { [weak self] in self?.launch() }
     }
 
-    /// Stops the daemon cleanly.
+    /// Stops the child cleanly.
     ///
     /// Called when the app closes. Without this, the daemon would outlive the
     /// application meant to host it and its socket would stay behind, which
@@ -50,16 +58,16 @@ final class DaemonSupervisor: @unchecked Sendable {
 
         let process = Process()
         process.executableURL = binary
-        process.arguments = ["daemon"]
-        // The daemon writes its diagnostics to stderr; we let them go to the
-        // system log rather than buffering them inside the app.
+        process.arguments = [subcommand]
+        // Diagnostics go to stderr; we let them reach the system log rather
+        // than buffering them inside the app.
         process.standardOutput = FileHandle.nullDevice
 
         process.terminationHandler = { [weak self] proc in
             guard let self else { return }
             self.queue.async {
                 guard !self.stopping else { return }
-                NSLog("mcpwall: daemon exited (code \(proc.terminationStatus)), restarting")
+                NSLog("mcpwall: \(self.subcommand) exited (code \(proc.terminationStatus)), restarting")
                 self.scheduleRestart()
             }
         }
@@ -68,20 +76,20 @@ final class DaemonSupervisor: @unchecked Sendable {
             lastStart = Date()
             try process.run()
             self.process = process
-            NSLog("mcpwall: daemon started (pid \(process.processIdentifier))")
+            NSLog("mcpwall: \(subcommand) started (pid \(process.processIdentifier))")
         } catch {
-            NSLog("mcpwall: could not start the daemon: \(error)")
+            NSLog("mcpwall: could not start \(subcommand): \(error)")
             scheduleRestart()
         }
     }
 
     /// Restarts with exponential backoff.
     ///
-    /// A daemon that fails at startup — socket taken, policy unreadable — must
-    /// not be restarted in a tight loop: that would burn the machine without
-    /// ever succeeding, and drown the real cause in the logs.
+    /// A child that fails at startup — socket taken, port taken, policy
+    /// unreadable — must not be restarted in a tight loop: that would burn the
+    /// machine without ever succeeding, and drown the real cause in the logs.
     private func scheduleRestart() {
-        // A daemon that ran for a long time starts from zero again: that is an
+        // A child that ran for a long time starts from zero again: that is an
         // isolated incident, not a failure loop.
         if Date().timeIntervalSince(lastStart) > 60 {
             restarts = 0
@@ -89,7 +97,7 @@ final class DaemonSupervisor: @unchecked Sendable {
         restarts += 1
 
         guard restarts <= 10 else {
-            NSLog("mcpwall: the daemon keeps failing, giving up on restarting")
+            NSLog("mcpwall: \(subcommand) keeps failing, giving up on restarting")
             return
         }
 
