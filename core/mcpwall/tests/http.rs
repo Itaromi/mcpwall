@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use mcpwall::http::RouteTable;
+use mcpwall::transport::http::RouteTable;
 use serde_json::Value;
 
 fn mcpwall() -> PathBuf {

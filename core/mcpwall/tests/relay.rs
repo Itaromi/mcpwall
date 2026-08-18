@@ -1,13 +1,15 @@
-//! Relay tests.
+//! Relay tests: what crosses the shim, and what it must never change.
 //!
 //! Everything runs on in-memory buffers: no processes, no SQLite. What these
 //! tests check above all is that no inspection anomaly interrupts traffic.
 
 use std::sync::{Arc, Mutex};
 
-use mcpwall::frame::SplitterStats;
-use mcpwall::mcp::{AllowAll, CallContext, DecisionError, DecisionPoint, Disposition, Verdict};
-use mcpwall::wrap::{Anomaly, Direction, FrameEvent, Observer, Pump};
+use mcpwall::protocol::frame::SplitterStats;
+use mcpwall::protocol::mcp::{
+    AllowAll, CallContext, DecisionError, DecisionPoint, Disposition, Verdict,
+};
+use mcpwall::transport::stdio::{Anomaly, Direction, FrameEvent, Observer, Pump};
 use tokio::sync::mpsc;
 
 // --- Test harness ---

@@ -20,8 +20,8 @@ use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 
-use crate::frame::{Frame, FrameError, FrameSplitter, SplitterStats};
-use crate::mcp::{
+use crate::protocol::frame::{Frame, FrameError, FrameSplitter, SplitterStats};
+use crate::protocol::mcp::{
     CallContext, DecisionPoint, Disposition, MethodScan, Verdict, classify, deny_response,
     scan_method,
 };

@@ -1,7 +1,7 @@
 //! Frame splitting tests. Priority to read boundaries and to servers that
 //! violate the spec — that is where the real pitfalls are.
 
-use mcpwall::frame::{FrameError, FrameSplitter};
+use mcpwall::protocol::frame::{FrameError, FrameSplitter};
 
 /// Pushes everything at once and drains. Returns the *contents*.
 fn split_all(input: &[u8], max: usize) -> (Vec<Vec<u8>>, Vec<FrameError>) {

@@ -12,8 +12,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use mcpwall::mcp::AllowAll;
-use mcpwall::wrap::{Direction, NullObserver, Pump};
+use mcpwall::protocol::mcp::AllowAll;
+use mcpwall::transport::stdio::{Direction, NullObserver, Pump};
 
 /// Per-frame budget in passthrough.
 #[cfg_attr(debug_assertions, allow(dead_code))]

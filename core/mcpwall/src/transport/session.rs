@@ -31,9 +31,9 @@ use anyhow::{Context, Result, anyhow};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
-use crate::frame::DEFAULT_MAX_FRAME_BYTES;
-use crate::mcp::DecisionPoint;
-use crate::wrap::{Direction, Observer, Pump};
+use crate::protocol::frame::DEFAULT_MAX_FRAME_BYTES;
+use crate::protocol::mcp::DecisionPoint;
+use crate::transport::stdio::{Direction, Observer, Pump};
 
 /// Grace given to the upstream to exit after `SIGTERM` before `SIGKILL`.
 const GRACE: Duration = Duration::from_secs(5);

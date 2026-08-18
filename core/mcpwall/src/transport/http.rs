@@ -46,7 +46,7 @@ use hyper::{Method, Request, Response, StatusCode, Uri};
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 
-use crate::mcp::{
+use crate::protocol::mcp::{
     CallContext, DecisionPoint, Disposition, MethodScan, Verdict, classify, deny_response,
     scan_method,
 };

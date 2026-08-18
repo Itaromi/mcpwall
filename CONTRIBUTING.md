@@ -118,6 +118,12 @@ git push origin feat/your-feature-name
 - **Priority.** Bug fixes take priority over feature requests. Anything that
   makes mcpwall *silently stop filtering* takes priority over everything.
 
+## Finding your way around
+
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) is the map: where each layer lives,
+what a tool call meets on its way through, and which file enforces which
+invariant. Read it before your first change and you will not have to guess.
+
 ## Start by reading SPEC.md
 
 [SPEC.md](SPEC.md) is the reference document, not an artefact of the past. Its
@@ -232,10 +238,13 @@ A green `cargo test` on macOS is not evidence.
 - **`sockaddr_un.sun_path` is 104 bytes on macOS**, 108 on Linux. CI's temporary
   directory is long enough to blow past it; tests use short `/tmp` paths for a
   reason.
-- **`tests/ask.rs` has a known latent timing flake.** If you see it fail,
-  **capture the test name before changing anything** — that is the piece of
-  evidence currently missing, and widening a timing bound without it weakens a
-  real assertion for nothing.
+- **Load changes what a test proves.** `a_late_answer_is_ignored_without_damage`
+  waited for a prompt to expire with `let _ = ui.recv()`, which swallowed the
+  case where the expiry had not happened yet. The test then answered a *live*
+  prompt, the daemon rightly honoured it, and the assertion failed three lines
+  later for a reason nowhere near its cause — only ever under parallel load. If
+  a test depends on something having already happened, **assert that it did**
+  rather than reading past it.
 
 ## Commit messages
 

@@ -42,9 +42,9 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::client::{DaemonClient, SessionInfo};
-use crate::mcp::{CallContext, DecisionPoint, Verdict};
-use crate::scope::{ScopeResolver, canonicalize_for_scope};
+use crate::ipc::client::{DaemonClient, SessionInfo};
+use crate::protocol::mcp::{CallContext, DecisionPoint, Verdict};
+use crate::protocol::scope::{ScopeResolver, canonicalize_for_scope};
 
 /// Prefix Claude Code gives to tools that come from an MCP server.
 const MCP_PREFIX: &str = "mcp__";

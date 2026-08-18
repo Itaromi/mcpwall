@@ -21,6 +21,8 @@
 //! therefore carries the protocol version; on incompatibility the shim goes
 //! **fail-open** and writes a visible warning, rather than misreading verdicts.
 
+pub mod client;
+
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};

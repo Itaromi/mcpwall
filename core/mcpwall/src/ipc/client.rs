@@ -29,9 +29,9 @@ use crate::ipc::{
     ClientMessage, DecideRequest, DecideResponse, Hello, Outcome, ServerMessage, TaintReport,
     ToolsReport,
 };
-use crate::mcp::{CallContext, DecisionError, DecisionPoint, Verdict};
-use crate::scope::Scope;
-use crate::{drift, taint};
+use crate::protocol::mcp::{CallContext, DecisionError, DecisionPoint, Verdict};
+use crate::protocol::scope::Scope;
+use crate::protocol::{drift, taint};
 
 /// How long to wait for a verdict when the daemon announces nothing.
 ///

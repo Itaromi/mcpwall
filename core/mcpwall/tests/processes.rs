@@ -1,4 +1,4 @@
-//! Integration tests against real processes.
+//! Process lifecycle, against real binaries that misbehave on purpose.
 //!
 //! The defects this module targets — orphans, deadlocks, badly closed
 //! descriptors, lost exit codes — are precisely the ones no mocked test will
