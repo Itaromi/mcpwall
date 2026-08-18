@@ -16,7 +16,7 @@ use mcpwall::journal::{self, Journal};
 use mcpwall::mcp::{AllowAll, DecisionPoint};
 use mcpwall::observer::JournalObserver;
 use mcpwall::session::{SessionConfig, run};
-use mcpwall::{daemon, hook, ipc, policy, setup};
+use mcpwall::{daemon, hook, http, ipc, policy, setup};
 
 #[derive(Parser)]
 #[command(
@@ -44,6 +44,13 @@ enum Command {
     /// In M2 it is the macOS app that starts and supervises it as a child
     /// process: the app does not reimplement it.
     Daemon(DaemonArgs),
+    /// Proxy streamable HTTP MCP servers.
+    ///
+    /// Unlike `wrap`, this one is long-lived and load-bearing: an HTTP client
+    /// connects to a URL, so the only way to interpose is to be that URL.
+    /// Servers routed through it are unreachable while it is stopped. The app
+    /// supervises it; `mcpwall restore` puts the original URLs back.
+    Proxy(ProxyArgs),
     /// Answer a Claude Code hook. Reads one JSON object on stdin.
     ///
     /// Covers what MCP cannot see: the built-in `Read`, `Edit`, `Bash` and
@@ -67,6 +74,21 @@ struct DaemonArgs {
     /// Policy file. Created with the default rules if missing.
     #[arg(long)]
     policy: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct ProxyArgs {
+    /// Route table. Defaults to `~/.mcpwall/routes.json`, written by `init`.
+    #[arg(long)]
+    routes: Option<PathBuf>,
+
+    /// Address to listen on. Overrides what the route table declares.
+    #[arg(long)]
+    listen: Option<String>,
+
+    /// Daemon socket. Defaults to `~/.mcpwall/daemon.sock`.
+    #[arg(long)]
+    socket: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -163,6 +185,13 @@ fn main() -> Result<()> {
                 args.policy.unwrap_or_else(ipc::policy_path),
                 db,
             ))
+        }
+        Command::Proxy(args) => {
+            init_tracing_at("info");
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(cmd_proxy(db, args))
         }
         Command::Hook(args) => cmd_hook(args),
         Command::Init(args) => cmd_init(args),
@@ -346,6 +375,49 @@ fn hhmmss(ms: i64) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Streamable HTTP
+// ---------------------------------------------------------------------------
+
+async fn cmd_proxy(_db: PathBuf, args: ProxyArgs) -> Result<()> {
+    let path = args.routes.unwrap_or_else(ipc::routes_path);
+    let mut table = if path.exists() {
+        http::RouteTable::load(&path)?
+    } else {
+        // Started before `init` has written anything: listening with no route
+        // is correct and says so, where exiting would send the app's supervisor
+        // into a restart loop over a file that is simply not there yet.
+        tracing::warn!(path = %path.display(), "no route table, nothing to proxy yet");
+        http::RouteTable::default()
+    };
+    if let Some(listen) = args.listen {
+        table.listen = listen;
+    }
+
+    let (addr, routes) = table.resolve()?;
+
+    // The same degraded mode as the shim: no daemon means no policy, not a
+    // dead proxy. Here the distinction matters more than anywhere else,
+    // because a proxy that refuses to start takes the user's servers with it.
+    let socket = args.socket.unwrap_or_else(ipc::socket_path);
+    let decision: Arc<dyn mcpwall::mcp::DecisionPoint> = match DaemonClient::connect(
+        &socket,
+        false,
+        SessionInfo {
+            server: Some("http-proxy".to_owned()),
+            ..SessionInfo::default()
+        },
+    ) {
+        Some(c) => Arc::new(c),
+        None => {
+            tracing::warn!("daemon unreachable — proxying without policy");
+            Arc::new(AllowAll)
+        }
+    };
+
+    http::serve(http::Proxy::new(routes, decision)?, addr).await
+}
+
+// ---------------------------------------------------------------------------
 // Claude Code hook
 // ---------------------------------------------------------------------------
 
@@ -384,10 +456,23 @@ fn cmd_init(args: InitArgs) -> Result<()> {
     let shim = setup::ensure_shim_link(&exe)?;
     println!("shim  {} -> {}", shim.display(), exe.display());
 
+    // HTTP servers are pointed at the local proxy rather than wrapped, so the
+    // address it listens on has to be known before the diff is computed. An
+    // existing route table keeps its address: the user may have moved it off
+    // the default port, and `init` changing it under them would silently
+    // break every URL it wrote last time.
+    let routes_path = ipc::routes_path();
+    let mut table = if routes_path.exists() {
+        http::RouteTable::load(&routes_path)?
+    } else {
+        http::RouteTable::default()
+    };
+    let listen = table.listen.clone();
+
     let targets = setup::discover(&args.projects);
     let mut plans = Vec::new();
     for t in &targets {
-        match setup::plan(t, &shim) {
+        match setup::plan(t, &shim, &listen) {
             Ok(p) => plans.push(p),
             Err(e) => println!("\n{}  skipped: {e}", t.path.display()),
         }
@@ -466,6 +551,33 @@ fn cmd_init(args: InitArgs) -> Result<()> {
         }
         let backup = setup::apply(p)?;
         println!("wrote  {}  (backup {})", p.path.display(), backup.display());
+    }
+
+    // The route table last: a configuration pointing at a proxy that does not
+    // know the route yet is a broken server, and this ordering keeps that
+    // window to the width of one file write.
+    let routes: Vec<_> = plans.iter().flat_map(|p| p.routes.iter()).collect();
+    if !routes.is_empty() {
+        for (name, upstream) in &routes {
+            table.routes.insert((*name).clone(), (*upstream).clone());
+        }
+        if let Some(dir) = routes_path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(&routes_path, serde_json::to_string_pretty(&table)? + "\n")?;
+        println!(
+            "wrote  {}  ({} route(s))",
+            routes_path.display(),
+            routes.len()
+        );
+        println!(
+            "\n⚠️  The {} HTTP server(s) above now go through the local proxy on {}.\n   \
+             Unlike the stdio servers, they are unreachable while it is stopped: an HTTP\n   \
+             client connects to a URL, so there is no way to interpose without being in\n   \
+             the path. The app supervises it; `mcpwall restore` puts the URLs back.",
+            routes.len(),
+            table.listen
+        );
     }
 
     println!("\nRestart your MCP clients for the new configuration to take effect.");

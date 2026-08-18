@@ -28,10 +28,18 @@ Being honest about coverage is a credibility argument.
 | | Covered |
 | --- | --- |
 | MCP servers over stdio | yes |
-| MCP servers over streamable HTTP | planned (M3) |
+| MCP servers over streamable HTTP | yes — via the local proxy |
 | Claude Code built-in tools (`Read`, `Edit`, `Bash`, `WebFetch`) | yes — `PreToolUse` / `PostToolUse` hooks |
 | Codex built-in tools | **no** — its security model goes through the sandbox |
 | Cursor | MCP traffic only |
+
+Streamable HTTP works differently from stdio, and the difference is worth
+knowing before you rely on it. A stdio server is *started by your client*, with
+mcpwall as its command — if mcpwall is missing, the server runs anyway. An HTTP
+client connects to a URL, so the only way to interpose is to **be** the URL:
+`init` points your configuration at a local proxy on `127.0.0.1`. While that
+proxy is stopped, the servers routed through it are unreachable. The app
+supervises it, and `mcpwall restore` puts the original URLs back.
 
 An MCP proxy only sees MCP traffic. For Claude Code, the built-in tools are most
 of the attack surface: covering them is the hook's job, not the proxy's.
@@ -42,14 +50,17 @@ point.
 
 ## Status
 
-Milestones M0, M1 and M2 are done: stdio relay, journal, policy daemon,
-`init`/`restore`, and the macOS application — menu bar, decision panel, journal
-window, graphical install.
+Milestones M0 to M3 are done: stdio relay, journal, policy daemon,
+`init`/`restore`, the macOS application — menu bar, decision panel, journal
+window, graphical install — and the depth work: taint tracking, the Claude Code
+hooks, rug-pull detection, and the streamable HTTP proxy.
 
 **There is no distributable build yet.** The `.dmg` is neither signed nor
-notarised, so Gatekeeper forces a right click → Open. Sparkle is not wired up.
-See [SPEC.md](SPEC.md) §10 for what remains, and for the architecture and the
-decisions taken with their reasons.
+notarised, so Gatekeeper forces a right click → Open — which is exactly the
+friction a "no terminal required" install is supposed to remove. Signing needs a
+Developer ID identity, and Sparkle needs a published feed and an EdDSA key pair;
+neither exists yet. See [SPEC.md](SPEC.md) §10 for what remains, and for the
+architecture and the decisions taken with their reasons.
 
 ## Build and try it
 
@@ -105,7 +116,7 @@ nobody there to confirm. The message returned to the agent says so explicitly.
 ## Development
 
 ```sh
-cargo test                                    # 216 tests, fake servers included
+cargo test                                    # 228 tests, fake servers included
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --check
 cargo test --release --test bench -- --nocapture   # latency, 5 ms p99 threshold

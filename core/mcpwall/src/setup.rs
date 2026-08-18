@@ -133,6 +133,10 @@ pub struct Plan {
     pub after: String,
     pub wrapped: Vec<String>,
     pub already: Vec<String>,
+    /// `(route name, real upstream URL)` for the HTTP servers this file
+    /// pointed at. Collected here rather than written on the spot: nothing is
+    /// written before the whole diff has been shown.
+    pub routes: Vec<(String, String)>,
     pub uncovered: Vec<Uncovered>,
 }
 
@@ -152,7 +156,7 @@ impl Plan {
 }
 
 /// Computes the rewrite, without writing anything.
-pub fn plan(target: &Target, shim: &Path) -> Result<Plan> {
+pub fn plan(target: &Target, shim: &Path, listen: &str) -> Result<Plan> {
     let before = std::fs::read_to_string(&target.path)
         .with_context(|| format!("reading {}", target.path.display()))?;
     let mut doc: Value = serde_json::from_str(&before)
@@ -161,6 +165,7 @@ pub fn plan(target: &Target, shim: &Path) -> Result<Plan> {
     let mut wrapped = Vec::new();
     let mut already = Vec::new();
     let mut uncovered = Vec::new();
+    let mut routes = Vec::new();
 
     // `~/.claude.json` carries servers at the root *and* per project. The two
     // locations are handled one after the other rather than collected: two
@@ -181,11 +186,18 @@ pub fn plan(target: &Target, shim: &Path) -> Result<Plan> {
                 match wrap_entry(cfg, shim, Some(&project)) {
                     WrapResult::Wrapped => wrapped.push(name.clone()),
                     WrapResult::Already => already.push(name.clone()),
-                    WrapResult::Uncovered(reason) => uncovered.push(Uncovered {
-                        name: name.clone(),
-                        reason,
-                    }),
-                    WrapResult::Skipped => {}
+                    WrapResult::Skipped => match route_entry(name, cfg, listen) {
+                        RouteResult::Routed(route, upstream) => {
+                            wrapped.push(name.clone());
+                            routes.push((route, upstream));
+                        }
+                        RouteResult::Already => already.push(name.clone()),
+                        RouteResult::Uncovered(reason) => uncovered.push(Uncovered {
+                            name: name.clone(),
+                            reason,
+                        }),
+                        RouteResult::NotAServer => {}
+                    },
                 }
             }
         }
@@ -196,11 +208,18 @@ pub fn plan(target: &Target, shim: &Path) -> Result<Plan> {
             match wrap_entry(cfg, shim, target.project.as_deref()) {
                 WrapResult::Wrapped => wrapped.push(name.clone()),
                 WrapResult::Already => already.push(name.clone()),
-                WrapResult::Uncovered(reason) => uncovered.push(Uncovered {
-                    name: name.clone(),
-                    reason,
-                }),
-                WrapResult::Skipped => {}
+                WrapResult::Skipped => match route_entry(name, cfg, listen) {
+                    RouteResult::Routed(route, upstream) => {
+                        wrapped.push(name.clone());
+                        routes.push((route, upstream));
+                    }
+                    RouteResult::Already => already.push(name.clone()),
+                    RouteResult::Uncovered(reason) => uncovered.push(Uncovered {
+                        name: name.clone(),
+                        reason,
+                    }),
+                    RouteResult::NotAServer => {}
+                },
             }
         }
     }
@@ -215,6 +234,7 @@ pub fn plan(target: &Target, shim: &Path) -> Result<Plan> {
         wrapped,
         already,
         uncovered,
+        routes,
     })
 }
 
@@ -312,6 +332,7 @@ pub fn plan_hook(settings: &Path, shim: &Path) -> Result<Plan> {
         wrapped: installed,
         already,
         uncovered: Vec::new(),
+        routes: Vec::new(),
     })
 }
 
@@ -333,14 +354,63 @@ fn mentions_command(group: &Value, command: &str) -> bool {
         })
 }
 
+/// Points an HTTP server's `url` at the local proxy, and returns the route the
+/// proxy must serve.
+///
+/// The original URL is kept in `x-mcpwall-original`, as for a wrapped command:
+/// `restore` works from the backups, but a person opening the file has to be
+/// able to see what was done without going to find them.
+fn route_entry(name: &str, cfg: &mut Value, listen: &str) -> RouteResult {
+    let Some(obj) = cfg.as_object_mut() else {
+        return RouteResult::NotAServer;
+    };
+    if obj.contains_key("command") {
+        return RouteResult::NotAServer;
+    }
+    let Some(url) = obj.get("url").and_then(Value::as_str).map(str::to_owned) else {
+        return RouteResult::NotAServer;
+    };
+
+    // Already routed. Re-pointing it at ourselves would produce a proxy in
+    // front of a proxy, and the second one would have lost the real upstream.
+    if url.starts_with(&format!("http://{listen}/")) {
+        return RouteResult::Already;
+    }
+
+    // A `url` we cannot proxy is a server left in the clear. Saying nothing
+    // would be the worst outcome of the three: the user reads a list of
+    // protected servers, does not see this one, and concludes it is not there.
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return RouteResult::Uncovered("its `url` is neither http nor https");
+    }
+
+    obj.insert(
+        "x-mcpwall-original".into(),
+        Value::Object(Map::from_iter([("url".into(), Value::String(url.clone()))])),
+    );
+    obj.insert(
+        "url".into(),
+        Value::String(format!("http://{listen}/{name}")),
+    );
+    RouteResult::Routed(name.to_owned(), url)
+}
+
+/// What became of an entry that had no command to wrap.
+enum RouteResult {
+    Routed(String, String),
+    /// Already pointing at our proxy.
+    Already,
+    /// A real server we cannot put ourselves in front of.
+    Uncovered(&'static str),
+    /// Not a server entry at all.
+    NotAServer,
+}
+
 enum WrapResult {
     Wrapped,
     Already,
-    /// A real server that mcpwall cannot protect yet. Reported, never silently
-    /// dropped: a user who believes a server is behind the firewall when it is
-    /// not is worse off than a user with no firewall at all.
-    Uncovered(&'static str),
-    /// Not a server entry we recognise at all.
+    /// Not a command-based server entry. It may still be an HTTP one, which
+    /// `route_entry` handles.
     Skipped,
 }
 
@@ -351,17 +421,14 @@ fn wrap_entry(cfg: &mut Value, shim: &Path, project: Option<&Path>) -> WrapResul
         return WrapResult::Skipped;
     };
 
-    // HTTP/SSE servers have no command to wrap: the HTTP transport lands in
-    // M3. Until then they are declared uncovered, by the presence of a `url`
-    // — the one field both HTTP transports share.
+    // An HTTP server has no command to wrap. It is routed instead, by
+    // `route_entry` — which is called separately because it needs a name and a
+    // port, neither of which this function has.
     let Some(command) = obj
         .get("command")
         .and_then(Value::as_str)
         .map(str::to_owned)
     else {
-        if obj.contains_key("url") {
-            return WrapResult::Uncovered("HTTP/SSE transport, not intercepted yet");
-        }
         return WrapResult::Skipped;
     };
 

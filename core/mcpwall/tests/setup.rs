@@ -22,6 +22,9 @@ fn write_config(dir: &Path, name: &str, v: &Value) -> PathBuf {
     p
 }
 
+/// The proxy address the HTTP routing tests write into URLs.
+const LISTEN: &str = "127.0.0.1:8787";
+
 fn shim() -> PathBuf {
     PathBuf::from("/Users/x/.mcpwall/bin/mcpwall")
 }
@@ -34,6 +37,7 @@ fn plan_for(path: &Path, kind: Kind, project: Option<PathBuf>) -> Plan {
             project,
         },
         &shim(),
+        LISTEN,
     )
     .expect("plan")
 }
@@ -264,10 +268,10 @@ fn applying_twice_does_not_wrap_twice() {
 }
 
 #[test]
-fn an_http_server_is_left_alone_but_reported() {
-    // No `command` to wrap: the HTTP transport lands in M3, and we do not
-    // pretend to cover it in the meantime. What we must not do is stay silent:
-    // a server missing from the output reads as a server that is not there.
+fn an_http_server_is_pointed_at_the_local_proxy() {
+    // No `command` to wrap. An HTTP client connects to a URL, so the only way
+    // to interpose is to be the URL — the entry is re-pointed at the local
+    // proxy, and the real upstream becomes a route.
     let dir = tmpdir("http");
     let path = write_config(
         &dir,
@@ -276,25 +280,33 @@ fn an_http_server_is_left_alone_but_reported() {
     );
 
     let p = plan_for(&path, Kind::ProjectMcp, None);
-    assert!(p.wrapped.is_empty());
+    assert_eq!(p.wrapped, vec!["remote"]);
     assert_eq!(
         parsed(&p)["mcpServers"]["remote"]["url"],
-        "https://example.com/mcp"
+        format!("http://{LISTEN}/remote")
     );
     assert_eq!(
+        p.routes,
+        vec![("remote".to_owned(), "https://example.com/mcp".to_owned())]
+    );
+    assert!(
+        p.uncovered.is_empty(),
+        "it is covered now: {:?}",
         p.uncovered
-            .iter()
-            .map(|u| u.name.as_str())
-            .collect::<Vec<_>>(),
-        vec!["remote"],
-        "an unprotected server must be named, not silently dropped"
+    );
+
+    // As for a wrapped command: `restore` works from the backups, but a person
+    // opening the file must be able to see what was done without them.
+    assert_eq!(
+        parsed(&p)["mcpServers"]["remote"]["x-mcpwall-original"]["url"],
+        "https://example.com/mcp"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn the_legacy_sse_transport_is_reported_too() {
+fn the_legacy_sse_transport_is_routed_too() {
     // The deprecated transport is still widely deployed. It is recognised by
     // its `url`, the one field both HTTP transports share, so a server declared
     // without an explicit `type` is not missed.
@@ -309,7 +321,7 @@ fn the_legacy_sse_transport_is_reported_too() {
     );
 
     let p = plan_for(&path, Kind::ProjectMcp, None);
-    let mut names: Vec<_> = p.uncovered.iter().map(|u| u.name.as_str()).collect();
+    let mut names: Vec<_> = p.routes.iter().map(|(n, _)| n.as_str()).collect();
     names.sort_unstable();
     assert_eq!(names, vec!["legacy", "typeless"]);
 
@@ -317,9 +329,32 @@ fn the_legacy_sse_transport_is_reported_too() {
 }
 
 #[test]
-fn a_wrapped_server_is_never_reported_as_uncovered() {
-    // The two lists must not overlap: a server that is behind mcpwall and also
-    // announced as unprotected would destroy any trust in the output.
+fn routing_twice_does_not_route_the_proxy_at_itself() {
+    // Re-running `init` is a reflex. A second pass must not point the proxy at
+    // its own address, which would lose the real upstream entirely.
+    let dir = tmpdir("http-twice");
+    let path = write_config(
+        &dir,
+        ".mcp.json",
+        &json!({"mcpServers": {"remote": {"type": "http", "url": "https://example.com/mcp"}}}),
+    );
+
+    let first = plan_for(&path, Kind::ProjectMcp, None);
+    std::fs::write(&path, &first.after).expect("write");
+
+    let second = plan_for(&path, Kind::ProjectMcp, None);
+    assert!(second.is_noop(), "{}", second.after);
+    assert!(second.routes.is_empty(), "{:?}", second.routes);
+    assert_eq!(
+        parsed(&second)["mcpServers"]["remote"]["url"],
+        format!("http://{LISTEN}/remote")
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_stdio_and_an_http_server_are_both_covered() {
     let dir = tmpdir("mixed");
     let path = write_config(
         &dir,
@@ -331,13 +366,13 @@ fn a_wrapped_server_is_never_reported_as_uncovered() {
     );
 
     let p = plan_for(&path, Kind::ProjectMcp, None);
-    assert_eq!(p.wrapped, vec!["local"]);
-    assert_eq!(
+    let mut names = p.wrapped.clone();
+    names.sort();
+    assert_eq!(names, vec!["local", "remote"]);
+    assert!(
+        p.uncovered.is_empty(),
+        "nothing is left unprotected here: {:?}",
         p.uncovered
-            .iter()
-            .map(|u| u.name.as_str())
-            .collect::<Vec<_>>(),
-        vec!["remote"]
     );
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -367,6 +402,7 @@ fn invalid_json_is_refused_without_overwriting() {
             project: None,
         },
         &shim(),
+        LISTEN,
     );
     assert!(r.is_err(), "an unreadable file must make the plan fail");
 
@@ -561,4 +597,35 @@ fn settings_that_are_not_an_object_are_refused_without_overwriting() {
         "[1, 2, 3]",
         "a refusal must leave the file exactly as it was"
     );
+}
+
+#[test]
+fn a_url_we_cannot_proxy_is_named_rather_than_dropped() {
+    // Being silent would be the worst of the three outcomes: the user reads a
+    // list of protected servers, does not find this one, and concludes it is
+    // not there.
+    let dir = tmpdir("http-odd");
+    let path = write_config(
+        &dir,
+        ".mcp.json",
+        &json!({"mcpServers": {"ws": {"url": "ws://example.com/mcp"}}}),
+    );
+
+    let p = plan_for(&path, Kind::ProjectMcp, None);
+    assert!(p.wrapped.is_empty());
+    assert!(p.routes.is_empty());
+    assert_eq!(
+        p.uncovered
+            .iter()
+            .map(|u| u.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["ws"]
+    );
+    assert_eq!(
+        parsed(&p)["mcpServers"]["ws"]["url"],
+        "ws://example.com/mcp",
+        "and it must be left exactly as it was"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
