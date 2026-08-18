@@ -3,7 +3,7 @@
 **A local application firewall for coding agents.** Little Snitch, but for AI
 agent tool calls.
 
-[Français](README.fr.md) · [Specification](SPEC.md) · [Contributing](CONTRIBUTING.md) · MIT
+[Français](README.fr.md) · [Specification](SPEC.md) · [Architecture](docs/ARCHITECTURE.md) · [Contributing](CONTRIBUTING.md) · MIT
 
 ---
 

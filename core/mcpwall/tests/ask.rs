@@ -284,8 +284,26 @@ fn a_late_answer_is_ignored_without_damage() {
 
     shim.send(Harness::decide_request("injected"));
     let prompt = ui.recv().expect("prompt");
-    let _ = ui.recv(); // the withdrawal
-    let _ = shim.recv(); // the refusal by expiry
+
+    // The expiry is a **precondition**, not an aside: everything after this
+    // point is only "late" because the prompt is already gone. Waiting for the
+    // withdrawal with `let _ =` swallowed the case where it never came, and the
+    // test then answered a prompt that was still pending — which the daemon
+    // rightly honoured, recording a session override, so no fresh prompt was
+    // raised and the assertion at the end failed for a reason three lines away
+    // from its cause.
+    //
+    // It only ever showed up under load, which is exactly when a timing
+    // assumption left unchecked turns into a flake.
+    let withdrawal = ui.recv().expect("the prompt must be withdrawn on expiry");
+    assert_eq!(
+        withdrawal["type"], "withdraw",
+        "expected the withdrawal before answering late, got {withdrawal}"
+    );
+    assert_eq!(withdrawal["prompt_id"], prompt["prompt_id"]);
+
+    let refusal = shim.recv().expect("the refusal by expiry");
+    assert_eq!(refusal["outcome"], "deny");
 
     // The user clicks after the fact. Nothing may break, and above all the
     // decision must not be recorded for later.

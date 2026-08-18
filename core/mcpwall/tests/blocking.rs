@@ -1,4 +1,4 @@
-//! M1 integration tests: real daemon, real shim, real socket.
+//! Blocking, end to end: real daemon, real shim, real socket.
 //!
 //! The test that defines the milestone is
 //! [`reading_a_dotenv_is_blocked_without_breaking_the_session`]: blocking must

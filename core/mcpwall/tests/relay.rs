@@ -1,4 +1,4 @@
-//! Relay tests.
+//! Relay tests: what crosses the shim, and what it must never change.
 //!
 //! Everything runs on in-memory buffers: no processes, no SQLite. What these
 //! tests check above all is that no inspection anomaly interrupts traffic.
