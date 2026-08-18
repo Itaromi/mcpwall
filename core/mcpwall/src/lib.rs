@@ -2,6 +2,7 @@
 
 pub mod client;
 pub mod daemon;
+pub mod drift;
 pub mod frame;
 pub mod hook;
 pub mod ipc;

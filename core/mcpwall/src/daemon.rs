@@ -5,7 +5,7 @@
 //! else (relaying, traffic journal) belongs to the shim, which keeps the daemon
 //! small enough that a failure in it is rare and, above all, survivable.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -68,6 +68,13 @@ pub struct Daemon {
     /// store would be blind to exactly it. It holds hashes only, never content,
     /// and everything ages out after `taint::TTL`.
     taint: Mutex<TaintStore>,
+    /// `server → tools whose advertisement has changed`, pending a decision.
+    ///
+    /// The comparison happens when a `tools/list` goes by; the rule fires when
+    /// the tool is *called*, which may be several frames later. Something has to
+    /// hold the answer in between, and it is small: drift is rare, and an entry
+    /// leaves as soon as the call it concerns has been ruled on.
+    drifted: Mutex<HashMap<String, HashSet<String>>>,
 }
 
 impl Daemon {
@@ -81,6 +88,7 @@ impl Daemon {
             next_prompt_id: AtomicU64::new(1),
             journal_db,
             taint: Mutex::new(TaintStore::new()),
+            drifted: Mutex::new(HashMap::new()),
         })
     }
 
@@ -238,6 +246,43 @@ impl Daemon {
                     }
                 }
 
+                ClientMessage::Tools(report) => {
+                    // No reply, for the same reason as `Taint`: the shim reads
+                    // one line per message it expects an answer to.
+                    //
+                    // The comparison touches the database, so it goes on a
+                    // blocking thread. A `tools/list` carrying a hundred tools
+                    // must not stall the executor that other shims' verdicts
+                    // are waiting on.
+                    let db = self.journal_db.clone();
+                    let server = report.server.clone();
+                    let tools = report.tools.clone();
+                    let found = tokio::task::spawn_blocking(move || {
+                        crate::journal::record_descriptions(&db, &server, &tools)
+                    })
+                    .await;
+
+                    match found {
+                        Ok(Ok(changed)) if !changed.is_empty() => {
+                            tracing::warn!(
+                                server = %report.server,
+                                tools = ?changed,
+                                "tool description changed since it was last seen"
+                            );
+                            self.drifted
+                                .lock()
+                                .await
+                                .entry(report.server.clone())
+                                .or_default()
+                                .extend(changed);
+                        }
+                        Ok(Ok(_)) => {}
+                        // Losing this costs a detection, never a session.
+                        Ok(Err(e)) => tracing::warn!(error = %e, "recording tool descriptions"),
+                        Err(e) => tracing::warn!(error = %e, "recording tool descriptions"),
+                    }
+                }
+
                 ClientMessage::Answer(answer) => {
                     let mut st = self.state.lock().await;
                     if let Some(tx) = st.pending.remove(&answer.prompt_id) {
@@ -296,7 +341,42 @@ impl Daemon {
                 }
             };
 
+            // Has this tool's advertisement changed since we last saw it?
+            //
+            // Read here and consumed on the way out, so the same change raises
+            // one prompt rather than one per call. The decision the user makes
+            // is about the change, and they only get to make it once.
+            request.drifted = match request.tool {
+                Some(t) => self
+                    .drifted
+                    .lock()
+                    .await
+                    .get(
+                        req.server
+                            .as_deref()
+                            .unwrap_or(crate::client::UNNAMED_SERVER),
+                    )
+                    .is_some_and(|set| set.contains(t)),
+                None => false,
+            };
+
             let decision = policy.evaluate(&request);
+
+            // Consumed whatever the verdict. Leaving it set would raise the
+            // same alarm about the same change on every subsequent call, and
+            // an alert the user has already answered is the definition of the
+            // fatigue §9 warns about.
+            if request.drifted
+                && let Some(t) = request.tool
+                && let Some(set) = self.drifted.lock().await.get_mut(
+                    req.server
+                        .as_deref()
+                        .unwrap_or(crate::client::UNNAMED_SERVER),
+                )
+            {
+                set.remove(t);
+            }
+
             let tool = request.tool.map(str::to_owned);
             (decision, scope, tool, policy.ask_timeout())
         };

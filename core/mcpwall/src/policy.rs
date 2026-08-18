@@ -267,7 +267,10 @@ rules:
     severity: critical
     message: "tainted local data in an outbound argument"
 
-  # M3: requires description drift detection.
+  # A tool that no longer describes itself the way it did when it was approved.
+  # The description is what the model reads to decide when to reach for the
+  # tool: rewriting it after approval changes what the tool does while every
+  # name and permission stays as it was.
   - id: tool_description_changed
     when:
       tool_description_drift: true
@@ -518,10 +521,7 @@ impl Policy {
             return None;
         }
 
-        // Still M3. Description drift does not exist yet, so a rule carrying
-        // it never fires — an inert rule visible in the file beats an absent
-        // rule we would forget to write.
-        if w.tool_description_drift {
+        if w.tool_description_drift && !req.drifted {
             return None;
         }
 
@@ -598,6 +598,13 @@ pub struct Request<'a> {
     /// Origin of the local data recognised in the arguments, when the taint
     /// store found any. Filled in by the daemon, which alone holds the store.
     pub tainted: Option<String>,
+    /// Has this tool's advertisement changed since it was last seen?
+    ///
+    /// Filled in by the daemon, which alone holds the record of what each
+    /// server advertised. The engine only reads it — the same shape as
+    /// `tainted`, and for the same reason: a rule must see a fact, not call
+    /// back into something that could block.
+    pub drifted: bool,
     pub scope_key: &'a str,
     pub scope_paths: &'a [PathBuf],
 }
@@ -656,6 +663,9 @@ pub fn request_from_frame<'a>(
         // Only the daemon holds the taint store; a request built from a frame
         // alone cannot know, and must not claim otherwise.
         tainted: None,
+        // Both are the daemon's to fill in: only it holds the taint store and
+        // the record of what each server advertised.
+        drifted: false,
         scope_key: "",
         scope_paths: scope.paths(),
     }
@@ -704,6 +714,11 @@ pub enum Finding {
     /// The origin is a path or a tool name — never the data itself, which the
     /// taint store does not keep and could not give back.
     Tainted { origin: String },
+    /// The tool's advertisement changed since it was last seen.
+    ///
+    /// Named, because "a tool description changed" in a prompt about a call to
+    /// `postgres.query` still leaves the user wondering which one.
+    Drifted { tool: String },
 }
 
 impl Finding {
@@ -711,6 +726,7 @@ impl Finding {
         match self {
             Self::Secret { kind, prefix } => format!("{kind} ({prefix}…)"),
             Self::Tainted { origin } => format!("local data read from {origin}"),
+            Self::Drifted { tool } => format!("`{tool}` no longer describes itself the same way"),
         }
     }
 }
@@ -730,6 +746,11 @@ fn collect_findings(req: &Request<'_>) -> Vec<Finding> {
         out.push(Finding::Tainted {
             origin: origin.clone(),
         });
+    }
+    if req.drifted
+        && let Some(t) = req.tool
+    {
+        out.push(Finding::Drifted { tool: t.to_owned() });
     }
     out
 }

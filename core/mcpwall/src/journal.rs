@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use tokio::sync::{mpsc, oneshot};
 
 /// Capacity of the volume channel. To be measured against real traffic.
@@ -224,6 +224,23 @@ fn init_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS entries_ts       ON entries(ts_ms);
         CREATE INDEX IF NOT EXISTS entries_session  ON entries(session_id);
         CREATE INDEX IF NOT EXISTS entries_verdict  ON entries(verdict) WHERE verdict IS NOT NULL;
+
+        -- What each tool looked like the last time we were shown it.
+        --
+        -- On disk rather than in the daemon's memory because a rug-pull is
+        -- measured in weeks: the server serves an honest description while it
+        -- is being approved and a different one once it is trusted. A record
+        -- that died with the process would only ever catch a server that
+        -- changed its mind inside a single session, which is the one case
+        -- nobody is worried about.
+        CREATE TABLE IF NOT EXISTS tool_descriptions (
+            server      TEXT NOT NULL,
+            tool        TEXT NOT NULL,
+            sha256      TEXT NOT NULL,
+            first_seen_ms INTEGER NOT NULL,
+            last_seen_ms  INTEGER NOT NULL,
+            PRIMARY KEY (server, tool)
+        );
         "#,
     )
     .context("creating the schema")?;
@@ -449,6 +466,61 @@ pub fn tail(conn: &Connection, limit: i64, since_id: i64) -> Result<Vec<(i64, Lo
     let mut out: Vec<(i64, LogLine)> = rows.collect::<rusqlite::Result<_>>()?;
     out.reverse(); // chronological order for display
     Ok(out)
+}
+
+/// Records what a server just advertised, and returns the tools whose
+/// advertisement has changed since we last saw them.
+///
+/// A tool seen for the first time never counts as drift. Everything is a first
+/// time on the day mcpwall is installed, and a firewall whose opening move is
+/// to question every tool the user already relies on has taught them, in one
+/// session, to click through its prompts.
+///
+/// The new hash is stored **whether or not it drifted**. The alternative — keep
+/// the old one until the user rules on it — makes every subsequent call raise
+/// the same alarm about the same change, and one decision is one prompt.
+///
+/// Writes are the daemon's own, not the shim's writer task: this runs once per
+/// `tools/list`, a few times per session, and is not on the hot path.
+pub fn record_descriptions(
+    db: &Path,
+    server: &str,
+    tools: &[(String, String)],
+) -> Result<Vec<String>> {
+    if tools.is_empty() {
+        return Ok(Vec::new());
+    }
+    let conn = Connection::open(db).with_context(|| format!("opening {}", db.display()))?;
+    init_schema(&conn)?;
+
+    let now = now_ms();
+    let mut drifted = Vec::new();
+
+    let tx = conn.unchecked_transaction()?;
+    for (tool, sha) in tools {
+        let previous: Option<String> = tx
+            .query_row(
+                "SELECT sha256 FROM tool_descriptions WHERE server = ?1 AND tool = ?2",
+                (server, tool),
+                |r| r.get(0),
+            )
+            .optional()?;
+
+        match previous {
+            Some(old) if &old != sha => drifted.push(tool.clone()),
+            _ => {}
+        }
+
+        tx.execute(
+            "INSERT INTO tool_descriptions (server, tool, sha256, first_seen_ms, last_seen_ms)
+             VALUES (?1, ?2, ?3, ?4, ?4)
+             ON CONFLICT(server, tool) DO UPDATE SET sha256 = ?3, last_seen_ms = ?4",
+            (server, tool, sha, now),
+        )?;
+    }
+    tx.commit()?;
+
+    Ok(drifted)
 }
 
 /// Today's counters, for the popover: (calls, blocked, active sessions).

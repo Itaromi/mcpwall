@@ -27,10 +27,11 @@ use std::time::Duration;
 
 use crate::ipc::{
     ClientMessage, DecideRequest, DecideResponse, Hello, Outcome, ServerMessage, TaintReport,
+    ToolsReport,
 };
 use crate::mcp::{CallContext, DecisionError, DecisionPoint, Verdict};
 use crate::scope::Scope;
-use crate::taint;
+use crate::{drift, taint};
 
 /// How long to wait for a verdict when the daemon announces nothing.
 ///
@@ -55,6 +56,12 @@ const TIMEOUT_MARGIN: Duration = Duration::from_secs(30);
 /// of §4 decides that trade-off the same way here as everywhere else.
 const TAINT_ACK_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Stands in for a server that has not introduced itself yet.
+///
+/// Must match what the daemon falls back to, or a drift record written under
+/// one name would be looked up under another.
+pub const UNNAMED_SERVER: &str = "(unnamed)";
+
 /// What the IPC thread may be asked to send.
 ///
 /// Two shapes, and the difference is load-bearing: `Decide` consumes exactly
@@ -70,6 +77,7 @@ enum Outgoing {
     /// it. The Claude Code hook is the opposite — a process that exists for one
     /// tool call and then exits, which would take the queued report with it.
     Taint(Box<TaintReport>, Option<mpsc::Sender<()>>),
+    Tools(Box<ToolsReport>),
 }
 
 /// Ceiling on the reads awaiting their response.
@@ -92,6 +100,17 @@ pub struct DaemonClient {
     /// mean paying one timeout per tool for nothing.
     degraded: AtomicBool,
     fail_closed: bool,
+    /// Name the upstream gave itself at `initialize`.
+    ///
+    /// Learned on the way down rather than passed in at construction: the shim
+    /// is started before the handshake, so at that point nobody knows it yet.
+    ///
+    /// It was previously a plain field on `SessionInfo` with a `set_server`
+    /// setter that **nothing ever called** — so every prompt reached the
+    /// decision panel with no server name on it, and drift would have keyed
+    /// every server on the machine together. Interior mutability because the
+    /// client is shared behind an `Arc` from the moment the relay starts.
+    server: Mutex<Option<String>>,
     session: SessionInfo,
     /// Derived from the daemon's hello.
     timeout: Duration,
@@ -204,6 +223,14 @@ impl DaemonClient {
                             }
                             continue;
                         }
+                        Outgoing::Tools(report) => {
+                            let msg = ClientMessage::Tools(*report);
+                            if let Ok(payload) = serde_json::to_string(&msg) {
+                                let _ = writeln!(write, "{payload}");
+                                let _ = write.flush();
+                            }
+                            continue;
+                        }
                     };
 
                     let response = (|| {
@@ -240,6 +267,7 @@ impl DaemonClient {
 
         Some(Self {
             tx,
+            server: Mutex::new(session.server.clone()),
             inflight_reads: Mutex::new(HashMap::new()),
             degraded: AtomicBool::new(false),
             fail_closed,
@@ -248,8 +276,38 @@ impl DaemonClient {
         })
     }
 
-    pub fn set_server(&mut self, server: Option<String>) {
-        self.session.server = server;
+    /// The upstream's name, or a stable placeholder before it has introduced
+    /// itself.
+    ///
+    /// A placeholder rather than an empty string: keys derived from this — the
+    /// drift record above all — must not merge every unnamed server into one.
+    fn server_name(&self) -> String {
+        self.server
+            .lock()
+            .ok()
+            .and_then(|s| s.clone())
+            .unwrap_or_else(|| UNNAMED_SERVER.to_owned())
+    }
+
+    /// Learns the upstream's name from its `initialize` response.
+    ///
+    /// It is the server's answer that is authoritative, per §5 — the client's
+    /// request carries no such thing.
+    fn note_server_name(&self, frame: &[u8]) {
+        let Ok(v) = serde_json::from_slice::<serde_json::Value>(frame) else {
+            return;
+        };
+        let Some(name) = v
+            .get("result")
+            .and_then(|r| r.get("serverInfo"))
+            .and_then(|s| s.get("name"))
+            .and_then(|n| n.as_str())
+        else {
+            return;
+        };
+        if let Ok(mut slot) = self.server.lock() {
+            *slot = Some(name.to_owned());
+        }
     }
 
     pub fn is_degraded(&self) -> bool {
@@ -318,7 +376,7 @@ impl DecisionPoint for DaemonClient {
             scope_key: self.session.scope_key.clone(),
             scope_source: self.session.scope_source.clone(),
             scope_paths: self.session.scope_paths.clone(),
-            server: self.session.server.clone(),
+            server: Some(self.server_name()),
             session_id: self.session.session_id,
         };
 
@@ -352,9 +410,24 @@ impl DecisionPoint for DaemonClient {
     }
 
     fn observe_response(&self, frame: &[u8]) {
-        // Only responses to a read we marked on the way up are of interest.
-        // Everything else — `tools/list` and its kilobytes of schemas, ordinary
-        // results — is dropped before anything is parsed twice.
+        // A `tools/list` result is the one thing on this path that is worth
+        // parsing on its own account: it is where a rug-pull becomes visible,
+        // and it never reaches the decision point because `tools/list` is in
+        // OBSERVE.
+        // The upstream introduces itself before it lists anything, so the name
+        // is known by the time the first `tools/list` comes back.
+        self.note_server_name(frame);
+
+        if let Some(tools) = drift::tools_in_response(frame) {
+            let _ = self.tx.send(Outgoing::Tools(Box::new(ToolsReport {
+                server: self.server_name(),
+                tools: tools.into_iter().map(|t| (t.name, t.sha256)).collect(),
+            })));
+            return;
+        }
+
+        // Otherwise: only responses to a read we marked on the way up.
+        // Everything else is dropped before anything is parsed twice.
         let Some(id) = frame_id(frame) else {
             return;
         };

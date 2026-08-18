@@ -97,6 +97,22 @@ pub enum ClientMessage {
     /// right shape on the merits — a read must never wait on the firewall to
     /// reach the agent.
     Taint(TaintReport),
+    /// The shim reports what a `tools/list` advertised, as hashes.
+    ///
+    /// Fire and forget, for the same reason as `Taint`: no reply line, and
+    /// `tools/list` is in OBSERVE — it is never blockable, so there is nothing
+    /// the shim could usefully wait for.
+    Tools(ToolsReport),
+}
+
+/// What a server currently advertises, on its way to drift detection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolsReport {
+    /// The server that advertised them. Drift is per server: two servers may
+    /// legitimately expose a tool of the same name meaning different things.
+    pub server: String,
+    /// `(tool name, hex SHA-256)`.
+    pub tools: Vec<(String, String)>,
 }
 
 /// Fingerprints of one local read, on their way to the daemon's taint store.

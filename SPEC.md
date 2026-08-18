@@ -442,7 +442,9 @@ forces a right click → Open, which is exactly the friction §8 forbids.
 - [x] Claude Code hook — `PreToolUse` decides, `PostToolUse` feeds the taint
       store, `init` installs both. Verified against the current documented
       contract (`hookSpecificOutput`, nested matcher groups), not from memory
-- [ ] tool description drift detection
+- [x] tool description drift detection — SHA-256 over description **and** input
+      schema, recorded per server in SQLite so it survives restarts, with the
+      §11 fake server that changes its story between two `tools/list` calls
 - [ ] streamable HTTP transport
 - [x] JSONL export (delivered in M2 with the journal window)
 
