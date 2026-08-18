@@ -3,7 +3,7 @@
 **Un pare-feu applicatif local pour agents de code.** Little Snitch, mais pour
 les appels d'outils des agents IA.
 
-[English](README.md) · [Spécification](SPEC.md) · MIT
+[English](README.md) · [Spécification](SPEC.md) · [Contribuer](CONTRIBUTING.md) · MIT
 
 ---
 
