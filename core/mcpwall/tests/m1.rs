@@ -13,11 +13,22 @@ fn mcpwall() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_mcpwall"))
 }
 
+/// A fake server.
+///
+/// Located through the constant Cargo defines for each binary of this package,
+/// not by guessing a sibling of the shim: that guess silently produced a path
+/// to a binary nothing had built, and every test that starts a real process
+/// failed for a reason that had nothing to do with the product.
 fn server(name: &str) -> PathBuf {
-    let mut p = mcpwall();
-    p.pop();
-    p.push(name);
-    p
+    PathBuf::from(match name {
+        "normal" => env!("CARGO_BIN_EXE_normal"),
+        "silent" => env!("CARGO_BIN_EXE_silent"),
+        "huge" => env!("CARGO_BIN_EXE_huge"),
+        "malformed" => env!("CARGO_BIN_EXE_malformed"),
+        "dies_midmessage" => env!("CARGO_BIN_EXE_dies_midmessage"),
+        "ignores_sigterm" => env!("CARGO_BIN_EXE_ignores_sigterm"),
+        other => panic!("unknown fake server: {other}"),
+    })
 }
 
 /// A short working directory.
@@ -303,10 +314,20 @@ fn a_shim_of_an_incompatible_version_goes_fail_open() {
         r#"{{"type":"decide","method":"tools/call","frame":"{{}}","scope_key":"x","scope_source":"cwd","scope_paths":[],"server":null,"session_id":0}}"#
     )
     .ok();
-    assert!(
-        lines.next().is_none(),
-        "no verdict may be issued after an incompatible handshake"
-    );
+    // What must hold is that **no verdict comes back** — not that the read ends
+    // in any one particular way. The two differ by platform: having closed its
+    // end, the daemon leaves macOS to report a clean EOF, while Linux answers
+    // the write to a closed socket with an RST and the next read fails with
+    // ECONNRESET. Demanding `None` made this test assert an accident of the
+    // host rather than the property it exists for — and it went unnoticed
+    // because the whole file was not running.
+    match lines.next() {
+        None => {}
+        Some(Err(_)) => {}
+        Some(Ok(line)) => {
+            panic!("a verdict was issued after an incompatible handshake: {line}")
+        }
+    }
 }
 
 #[test]

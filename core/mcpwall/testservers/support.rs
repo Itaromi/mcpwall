@@ -1,7 +1,16 @@
-//! Fake MCP servers for the integration tests.
+//! Shared plumbing for the fake MCP servers of the integration tests.
 //!
-//! Deliberately written with blocking I/O and no dependency on `mcpwall`: they
-//! must be free to misbehave without our own code deciding how.
+//! Deliberately written with blocking I/O and no dependency on the `mcpwall`
+//! library: the fake servers must be free to misbehave without our own code
+//! deciding how.
+//!
+//! Included by `#[path]` rather than shared through a crate, because a separate
+//! crate's binaries are not built by `cargo test` — see the `[[bin]]` block in
+//! `Cargo.toml`.
+
+// Each fake server uses a subset of these helpers; that is the point of a
+// shared module, not a defect.
+#![allow(dead_code)]
 
 use std::io::{BufRead, Write};
 

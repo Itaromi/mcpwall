@@ -101,7 +101,7 @@ nobody there to confirm. The message returned to the agent says so explicitly.
 ## Development
 
 ```sh
-cargo test                                    # 167 tests
+cargo test                                    # 188 tests, fake servers included
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --check
 cargo test --release --test bench -- --nocapture   # latency, 5 ms p99 threshold

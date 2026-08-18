@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["core/mcpwall", "core/testservers"]
+members = ["core/mcpwall"]
 
 [workspace.package]
 edition = "2024"
