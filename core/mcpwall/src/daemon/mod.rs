@@ -5,6 +5,8 @@
 //! else (relaying, traffic journal) belongs to the shim, which keeps the daemon
 //! small enough that a failure in it is rare and, above all, survivable.
 
+pub mod policy;
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -16,13 +18,13 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, broadcast, oneshot};
 
+use crate::daemon::policy::{Action, Decision, Policy, request_from_frame};
 use crate::ipc::{
     Answer, ClientMessage, DecideRequest, DecideResponse, Hello, Outcome, Prompt, ServerMessage,
     Status, Until,
 };
-use crate::policy::{Action, Decision, Policy, request_from_frame};
-use crate::scope::{Scope, ScopeSource};
-use crate::taint::{Fingerprint, TaintStore, fingerprint};
+use crate::protocol::scope::{Scope, ScopeSource};
+use crate::protocol::taint::{Fingerprint, TaintStore, fingerprint};
 
 /// Capacity of the broadcast channel towards the UIs.
 ///
@@ -354,7 +356,7 @@ impl Daemon {
                     .get(
                         req.server
                             .as_deref()
-                            .unwrap_or(crate::client::UNNAMED_SERVER),
+                            .unwrap_or(crate::ipc::client::UNNAMED_SERVER),
                     )
                     .is_some_and(|set| set.contains(t)),
                 None => false,
@@ -371,7 +373,7 @@ impl Daemon {
                 && let Some(set) = self.drifted.lock().await.get_mut(
                     req.server
                         .as_deref()
-                        .unwrap_or(crate::client::UNNAMED_SERVER),
+                        .unwrap_or(crate::ipc::client::UNNAMED_SERVER),
                 )
             {
                 set.remove(t);
@@ -558,7 +560,8 @@ impl Daemon {
                     allow,
                 });
                 if let Some(path) = &self.policy_path
-                    && let Err(e) = crate::policy::append_override(path, scope_key, tool, allow)
+                    && let Err(e) =
+                        crate::daemon::policy::append_override(path, scope_key, tool, allow)
                 {
                     tracing::error!(error = %e, "permanent override not persisted");
                 }

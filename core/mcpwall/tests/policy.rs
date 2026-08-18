@@ -7,8 +7,8 @@
 
 use std::path::PathBuf;
 
-use mcpwall::policy::{Action, DEFAULT_POLICY_YAML, Finding, Policy, request_from_frame};
-use mcpwall::scope::{Scope, ScopeSource};
+use mcpwall::daemon::policy::{Action, DEFAULT_POLICY_YAML, Finding, Policy, request_from_frame};
+use mcpwall::protocol::scope::{Scope, ScopeSource};
 
 fn scope(paths: &[&str]) -> Scope {
     Scope::new(
@@ -23,7 +23,7 @@ fn eval(
     tool: &str,
     args: serde_json::Value,
     sc: &Scope,
-) -> mcpwall::policy::Decision {
+) -> mcpwall::daemon::policy::Decision {
     let frame = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": { "name": tool, "arguments": args }
@@ -519,7 +519,7 @@ fn eval_tainted(
     args: serde_json::Value,
     sc: &Scope,
     origin: Option<&str>,
-) -> mcpwall::policy::Decision {
+) -> mcpwall::daemon::policy::Decision {
     let frame = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": { "name": tool, "arguments": args }

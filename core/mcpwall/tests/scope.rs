@@ -3,7 +3,9 @@
 //! The test that matters is [`forever_refused_on_weak_provenance`]: it is what
 //! stops a permanent permission from leaking from one project to another.
 
-use mcpwall::scope::{Scope, ScopeResolver, ScopeSource, canonicalize_for_scope, parse_root_uri};
+use mcpwall::protocol::scope::{
+    Scope, ScopeResolver, ScopeSource, canonicalize_for_scope, parse_root_uri,
+};
 use std::path::PathBuf;
 
 fn p(s: &str) -> PathBuf {

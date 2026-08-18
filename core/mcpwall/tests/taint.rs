@@ -6,7 +6,9 @@
 
 use std::time::{Duration, Instant};
 
-use mcpwall::taint::{Fingerprint, MIN_TOKEN_LEN, TTL, TaintStore, fingerprint, is_local_read};
+use mcpwall::protocol::taint::{
+    Fingerprint, MIN_TOKEN_LEN, TTL, TaintStore, fingerprint, is_local_read,
+};
 
 /// A `.env` as an agent would read one.
 ///

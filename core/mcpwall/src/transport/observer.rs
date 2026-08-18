@@ -9,11 +9,11 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::frame::SplitterStats;
 use crate::journal::{Entry, Journal, SessionRow, now_ms};
-use crate::mcp::{MethodScan, Verdict, parse_client_hello, parse_server_hello};
-use crate::scope::{ScopeResolver, ScopeSource, parse_root_uri};
-use crate::wrap::{Anomaly, Direction, FrameEvent, Observer};
+use crate::protocol::frame::SplitterStats;
+use crate::protocol::mcp::{MethodScan, Verdict, parse_client_hello, parse_server_hello};
+use crate::protocol::scope::{ScopeResolver, ScopeSource, parse_root_uri};
+use crate::transport::stdio::{Anomaly, Direction, FrameEvent, Observer};
 
 /// Maximum length of a stored argument excerpt.
 ///
@@ -50,11 +50,11 @@ impl JournalObserver {
 
         // Link 1: the path injected by `mcpwall init`.
         if let Some(p) = project {
-            scope.set_injected(crate::scope::canonicalize_for_scope(&p));
+            scope.set_injected(crate::protocol::scope::canonicalize_for_scope(&p));
         }
         // Link 3: the cwd inherited from the client, canonicalised.
         if let Ok(cwd) = std::env::current_dir() {
-            scope.set_cwd(crate::scope::canonicalize_for_scope(&cwd));
+            scope.set_cwd(crate::protocol::scope::canonicalize_for_scope(&cwd));
         }
 
         let resolved = scope.resolve();
@@ -178,7 +178,7 @@ impl Observer for JournalObserver {
             disposition: event.disposition.to_string(),
             verdict,
             rule,
-            preview: matches!(event.disposition, crate::mcp::Disposition::Decide)
+            preview: matches!(event.disposition, crate::protocol::mcp::Disposition::Decide)
                 .then(|| Self::preview(event.frame.content()))
                 .flatten(),
             bytes: event.frame.len() as i64,
@@ -247,7 +247,7 @@ fn parse_roots(frame: &[u8]) -> Option<Vec<std::path::PathBuf>> {
     let paths: Vec<_> = roots
         .iter()
         .filter_map(|r| r.get("uri")?.as_str().and_then(parse_root_uri))
-        .map(|p| crate::scope::canonicalize_for_scope(&p))
+        .map(|p| crate::protocol::scope::canonicalize_for_scope(&p))
         .collect();
     (!paths.is_empty()).then_some(paths)
 }

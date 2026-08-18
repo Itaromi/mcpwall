@@ -11,12 +11,13 @@ use std::sync::Arc;
 use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
 
-use mcpwall::client::{DaemonClient, SessionInfo};
+use mcpwall::ipc::client::{DaemonClient, SessionInfo};
 use mcpwall::journal::{self, Journal};
-use mcpwall::mcp::{AllowAll, DecisionPoint};
-use mcpwall::observer::JournalObserver;
-use mcpwall::session::{SessionConfig, run};
-use mcpwall::{daemon, hook, http, ipc, policy, setup};
+use mcpwall::protocol::mcp::{AllowAll, DecisionPoint};
+use mcpwall::transport::http;
+use mcpwall::transport::observer::JournalObserver;
+use mcpwall::transport::session::{SessionConfig, run};
+use mcpwall::{daemon, hook, ipc, setup};
 
 #[derive(Parser)]
 #[command(
@@ -399,7 +400,7 @@ async fn cmd_proxy(_db: PathBuf, args: ProxyArgs) -> Result<()> {
     // dead proxy. Here the distinction matters more than anywhere else,
     // because a proxy that refuses to start takes the user's servers with it.
     let socket = args.socket.unwrap_or_else(ipc::socket_path);
-    let decision: Arc<dyn mcpwall::mcp::DecisionPoint> = match DaemonClient::connect(
+    let decision: Arc<dyn mcpwall::protocol::mcp::DecisionPoint> = match DaemonClient::connect(
         &socket,
         false,
         SessionInfo {
@@ -608,7 +609,7 @@ fn cmd_restore() -> Result<()> {
 
 fn cmd_policy() -> Result<()> {
     let path = ipc::policy_path();
-    let policy = policy::Policy::load_or_create(&path)?;
+    let policy = daemon::policy::Policy::load_or_create(&path)?;
     println!("policy         {}", path.display());
     println!("default        {}", policy.default_action().as_str());
     println!("fail_closed    {}", policy.fail_closed());

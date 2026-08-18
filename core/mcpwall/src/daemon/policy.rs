@@ -20,7 +20,7 @@ use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::Deserialize;
 
-use crate::scope::Scope;
+use crate::protocol::scope::Scope;
 
 // ---------------------------------------------------------------------------
 // File model
@@ -647,7 +647,7 @@ pub fn request_from_frame<'a>(
         }
         // `resources/read` carries its path in `uri`.
         if let Some(uri) = params.get("uri").and_then(|u| u.as_str()) {
-            if let Some(p) = crate::scope::parse_root_uri(uri) {
+            if let Some(p) = crate::protocol::scope::parse_root_uri(uri) {
                 paths.push(p.to_string_lossy().into_owned());
             }
             values.push(uri.to_owned());

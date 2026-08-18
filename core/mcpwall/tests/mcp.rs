@@ -3,7 +3,7 @@
 //! Two obsessions: the method scan must never pick the wrong key, and
 //! `initialize` must never be blockable.
 
-use mcpwall::mcp::{
+use mcpwall::protocol::mcp::{
     AllowAll, CallContext, ClientHello, DecisionPoint, Disposition, METHOD_SCAN_WINDOW, MethodScan,
     ServerHello, classify, disposition, parse_client_hello, parse_server_hello, scan_method,
 };
@@ -235,7 +235,7 @@ fn m0_allows_everything() {
     };
     assert_eq!(
         AllowAll.decide(&ctx).expect("AllowAll cannot fail"),
-        mcpwall::mcp::Verdict::Allow
+        mcpwall::protocol::mcp::Verdict::Allow
     );
 }
 

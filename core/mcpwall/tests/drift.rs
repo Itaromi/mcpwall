@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use mcpwall::drift::{digest, tools_in_response};
 use mcpwall::journal::record_descriptions;
+use mcpwall::protocol::drift::{digest, tools_in_response};
 use serde_json::{Value, json};
 
 // --- What a digest covers ---

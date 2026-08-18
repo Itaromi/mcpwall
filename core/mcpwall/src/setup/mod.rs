@@ -117,7 +117,7 @@ pub fn discover(extra_projects: &[PathBuf]) -> Vec<Target> {
             out.push(Target {
                 path: f,
                 kind: Kind::ProjectMcp,
-                project: Some(crate::scope::canonicalize_for_scope(&p)),
+                project: Some(crate::protocol::scope::canonicalize_for_scope(&p)),
             });
         }
     }
