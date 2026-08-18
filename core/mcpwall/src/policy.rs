@@ -165,6 +165,13 @@ fn default_outbound_tools() -> Vec<String> {
         "*webhook*",
         "*request*",
         "*curl*",
+        // Claude Code's own built-ins, reaching the daemon through the hook of
+        // §7. Named exactly rather than covered by a glob: `*search*` would
+        // catch every third-party search tool there is, and a rule that fires
+        // on ordinary traffic is how a firewall teaches its user to click
+        // "allow" without reading.
+        "webfetch",
+        "websearch",
     ]
     .iter()
     .map(|s| (*s).to_owned())
@@ -208,6 +215,11 @@ outbound_tools:
   - "*webhook*"
   - "*request*"
   - "*curl*"
+  # Claude Code's own built-ins, which reach the daemon through the hook rather
+  # than through MCP. Named exactly: "*search*" would catch every third-party
+  # search tool there is.
+  - "webfetch"
+  - "websearch"
 
 rules:
   # Reading a local secret. High confidence: these paths are not read by

@@ -52,6 +52,12 @@ pub enum Kind {
     ProjectMcp,
     /// `~/.cursor/mcp.json`.
     Cursor,
+    /// `~/.claude/settings.json` — where the hooks of §7 are declared.
+    ///
+    /// Not an MCP configuration at all: no server is wrapped here. It is the
+    /// only way to reach Claude Code's built-in tools, which never go near an
+    /// MCP server and are most of the attack surface.
+    ClaudeHooks,
 }
 
 impl Kind {
@@ -60,6 +66,7 @@ impl Kind {
             Self::ClaudeGlobal => "Claude Code (global)",
             Self::ProjectMcp => "project",
             Self::Cursor => "Cursor",
+            Self::ClaudeHooks => "Claude Code hooks",
         }
     }
 }
@@ -211,6 +218,121 @@ pub fn plan(target: &Target, shim: &Path) -> Result<Plan> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// The Claude Code hook
+// ---------------------------------------------------------------------------
+
+/// Where Claude Code reads its settings.
+pub fn claude_settings_path() -> PathBuf {
+    home_dir().join(".claude").join("settings.json")
+}
+
+/// Tools whose result is local data, as a Claude Code matcher.
+///
+/// `PostToolUse` fires after *every* tool call, and each firing costs a process
+/// start. Only these produce anything the taint store can use, so the filtering
+/// happens in the matcher rather than after the spawn. It is the same list as
+/// `hook::classify`, expressed in the syntax the client understands — and if
+/// the two ever disagree the cost is a missed detection, never a wrong verdict.
+const LOCAL_READ_MATCHER: &str = "Read|Bash|BashOutput|Grep|Glob|NotebookRead";
+
+/// Plans the installation of the hook into `~/.claude/settings.json`.
+///
+/// The file is created if it does not exist, with `{}` recorded as its previous
+/// content so that `restore` has something to put back — otherwise installing
+/// the hook would be the one action `mcpwall restore` could not undo.
+///
+/// Existing hooks are **appended to, never replaced**. Whatever else the user
+/// has wired into `PreToolUse` is none of our business, and a firewall that
+/// silently removes someone's tooling on install does not get a second chance.
+/// The settings file is a parameter rather than read from `$HOME` inside, so
+/// the tests can exercise this against a temporary directory. Mutating the
+/// environment instead would make them race each other.
+pub fn plan_hook(settings: &Path, shim: &Path) -> Result<Plan> {
+    let path = settings.to_path_buf();
+    let before = match std::fs::read_to_string(&path) {
+        Ok(s) if !s.trim().is_empty() => s,
+        // Missing, or present but empty. Both mean "no settings yet".
+        _ => "{}\n".to_owned(),
+    };
+
+    let mut doc: Value = serde_json::from_str(&before)
+        .with_context(|| format!("{} is not valid JSON", path.display()))?;
+    if !doc.is_object() {
+        anyhow::bail!("{} is not a JSON object", path.display());
+    }
+
+    let command = format!("{} hook", shim.to_string_lossy());
+    let mut installed = Vec::new();
+    let mut already = Vec::new();
+
+    let hooks = doc
+        .as_object_mut()
+        .expect("checked above")
+        .entry("hooks")
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !hooks.is_object() {
+        anyhow::bail!("`hooks` in {} is not an object", path.display());
+    }
+
+    for (event, matcher) in [
+        // Every tool: any rule in the policy may apply to any of them.
+        ("PreToolUse", "*"),
+        // Only what can feed the taint store.
+        ("PostToolUse", LOCAL_READ_MATCHER),
+    ] {
+        let groups = hooks
+            .as_object_mut()
+            .expect("checked above")
+            .entry(event)
+            .or_insert_with(|| Value::Array(Vec::new()));
+        let Some(arr) = groups.as_array_mut() else {
+            anyhow::bail!("`hooks.{event}` in {} is not an array", path.display());
+        };
+
+        if arr.iter().any(|g| mentions_command(g, &command)) {
+            already.push(event.to_owned());
+            continue;
+        }
+
+        arr.push(serde_json::json!({
+            "matcher": matcher,
+            "hooks": [ { "type": "command", "command": command } ]
+        }));
+        installed.push(event.to_owned());
+    }
+
+    let after = serde_json::to_string_pretty(&doc)? + "\n";
+
+    Ok(Plan {
+        path,
+        kind: Kind::ClaudeHooks,
+        before,
+        after,
+        wrapped: installed,
+        already,
+        uncovered: Vec::new(),
+    })
+}
+
+/// Is our hook already wired into this matcher group?
+///
+/// Matched on the command string rather than on the shape of the group: the
+/// user may have moved it under a different matcher, and installing a second
+/// copy would run the hook twice per call.
+fn mentions_command(group: &Value, command: &str) -> bool {
+    group
+        .get("hooks")
+        .and_then(Value::as_array)
+        .is_some_and(|hs| {
+            hs.iter().any(|h| {
+                h.get("command")
+                    .and_then(Value::as_str)
+                    .is_some_and(|c| c == command)
+            })
+        })
+}
+
 enum WrapResult {
     Wrapped,
     Already,
@@ -280,9 +402,19 @@ fn wrap_entry(cfg: &mut Value, shim: &Path, project: Option<&Path>) -> WrapResul
 }
 
 /// Backs up, then writes.
+///
+/// The backup is written from `plan.before` rather than copied from the file.
+/// For a file that already exists the two are the same thing — `before` is what
+/// was read from it. For one we are creating, `~/.claude/settings.json` on a
+/// machine that has none, copying would fail and there would be nothing for
+/// `restore` to put back: installing the hook would be the single action
+/// `mcpwall restore` could not undo.
 pub fn apply(plan: &Plan) -> Result<PathBuf> {
+    if let Some(dir) = plan.path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
     let backup = backup_path(&plan.path);
-    std::fs::copy(&plan.path, &backup)
+    std::fs::write(&backup, &plan.before)
         .with_context(|| format!("backing up to {}", backup.display()))?;
     std::fs::write(&plan.path, &plan.after)
         .with_context(|| format!("writing {}", plan.path.display()))?;
@@ -304,7 +436,10 @@ pub fn backups() -> BTreeMap<PathBuf, Vec<PathBuf>> {
     let mut out: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
     let home = home_dir();
 
-    let mut dirs = vec![home.clone(), home.join(".cursor")];
+    // `~/.claude` holds the hook settings. Leaving it out would mean `restore`
+    // silently declined to undo the one change `init` makes outside an MCP
+    // configuration.
+    let mut dirs = vec![home.clone(), home.join(".cursor"), home.join(".claude")];
     if let Ok(cwd) = std::env::current_dir() {
         dirs.push(cwd);
     }
