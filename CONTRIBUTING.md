@@ -1,7 +1,9 @@
 # Contributing to mcpwall
 
-Thank you for being here. Before anything else, one sentence that governs every
-decision in this codebase:
+We welcome contributions from the community and look forward to working with you
+to improve this project.
+
+Before anything else, one sentence that governs every decision in this codebase:
 
 > **mcpwall sits on the hot path of somebody's working agent.**
 
@@ -10,18 +12,40 @@ agent that stops working mid-task, or — worse, because it is silent — a fire
 that has stopped filtering while still looking installed. Both cost more than
 the feature that caused them was worth.
 
-Everything below follows from that.
+Most of what follows is a consequence of that sentence.
 
-## Start by reading SPEC.md
+## How to contribute
 
-[SPEC.md](SPEC.md) is the reference document, not an artefact of the past. Its
-**decision log** records why each choice was made, including the choices that
-were wrong the first time and what the failure looked like.
+**1. Fork the repository.** Start by forking
+[Itaromi/mcpwall](https://github.com/Itaromi/mcpwall) to your own GitHub
+account.
 
-If you are about to ask "why on earth is it done that way", the answer is
-probably there — and if it is not, that is a gap worth reporting on its own.
+**2. Clone your fork** (replace `<YOUR_USERNAME>` with your GitHub username):
 
-## Getting set up
+```sh
+git clone https://github.com/<YOUR_USERNAME>/mcpwall.git
+cd mcpwall
+```
+
+**3. Create a branch:**
+
+```sh
+git checkout -b feat/your-feature-name
+```
+
+or
+
+```sh
+git checkout -b fix/your-bug-fix-name
+```
+
+**4. Make your changes.** If they touch the MCP specification, Claude Code
+hooks, or the format of client configuration files, read
+[Check the documentation first](#check-the-documentation-before-you-write)
+before you start — those formats change, and writing them from memory produces
+something that looks right and silently does nothing.
+
+**5. Test your changes:**
 
 ```sh
 cargo test                                          # 228 tests, fake servers included
@@ -32,14 +56,76 @@ cargo test --release --test bench -- --nocapture     # latency, 5 ms p99 thresho
 cd app && swift build                               # the macOS application
 ```
 
-The Rust toolchain is pinned in `rust-toolchain.toml`. Nothing else is needed:
-the core has no system dependency, and the app builds with the Command Line
-Tools alone (a *universal* app build needs Xcode; the script degrades to the
-native architecture and warns you).
+The Rust toolchain is pinned in `rust-toolchain.toml`; nothing else is needed.
+The core has no system dependency, and the app builds with the Command Line
+Tools alone — a *universal* app build needs Xcode, and the script degrades to
+the native architecture with a warning.
 
-CI runs the core on **macOS and Linux**. The product is macOS, but the core is
-meant to stay portable — see [Platform traps](#platform-traps) before you assume
-a green local run means anything.
+A green run on macOS is not evidence on its own. See
+[Platform traps](#platform-traps).
+
+**6. Commit your changes.** Write a message that explains *why* — this
+repository's history is documentation, and the format matters here more than it
+does in most projects. See [Commit messages](#commit-messages).
+
+```sh
+git add .
+git commit
+```
+
+**7. Push your branch:**
+
+```sh
+git push origin feat/your-feature-name
+```
+
+**8. Open a pull request** against `main` on
+[Itaromi/mcpwall](https://github.com/Itaromi/mcpwall).
+
+## Pull request guidelines
+
+- **One feature or fix per pull request.** If a change needs another change
+  first, stack them: branch B targets branch A, not `main`. Each diff then
+  stands on its own and can be reviewed without the others.
+- **Never delete a base branch while a PR still targets it.** GitHub closes the
+  dependent PR, and getting it back means restoring the branch by hand.
+- **Clear title and description.** Say what was wrong and why the fix has the
+  shape it does.
+- **Include tests.** Real ones — see [Tests](#tests) for what that means here.
+- **CI must be green on macOS *and* Linux.** `clippy -D warnings` and
+  `cargo fmt --check` are part of it. The product is macOS, but the core is
+  meant to stay portable.
+- **Keep your pull request up to date** if changes are requested.
+- **If you found something out of scope on the way, say so in the PR** rather
+  than fixing it quietly. Half the defects worth reporting in this project were
+  found while looking for something else.
+- **Report coverage honestly.** If your change leaves a case unhandled, name it —
+  in the README table, in `init`'s output, wherever a user would otherwise
+  conclude from an absence that they are protected. A user who believes a server
+  is behind the firewall when it is not is worse off than a user with no
+  firewall at all.
+
+## Issues
+
+- **Bug reports.** Open an issue with a clear description and steps to
+  reproduce. For anything that got past mcpwall, the three useful facts are:
+  **the call that went through**, **the policy in force**, and **which transport
+  it used** (stdio, HTTP, or the Claude Code hook).
+- **Feature requests.** Describe the feature and what it would let someone do.
+  Check [SPEC.md §2](SPEC.md) first — some things are non-goals on purpose
+  (multi-user, OAuth, RBAC, LLM analysis of calls, Windows in v1), and saying no
+  to those is a design decision rather than a backlog item.
+- **Priority.** Bug fixes take priority over feature requests. Anything that
+  makes mcpwall *silently stop filtering* takes priority over everything.
+
+## Start by reading SPEC.md
+
+[SPEC.md](SPEC.md) is the reference document, not an artefact of the past. Its
+**decision log** records why each choice was made, including the choices that
+were wrong the first time and what the failure looked like.
+
+If you are about to ask "why on earth is it done that way", the answer is
+probably there — and if it is not, that is a gap worth reporting on its own.
 
 ## Invariants you must not break
 
@@ -183,35 +269,37 @@ whether they are looking at an injection or at their own deliberate call.
 Length is not the point; a one-line change can deserve one line. Explaining
 *why* is the point.
 
-## Pull requests
+## Translations
 
-- **One concern per branch.** If a change needs another change first, stack them:
-  branch B targets branch A, not `main`. Each diff then stands on its own.
-- **Never delete a base branch while a PR still targets it** — GitHub closes the
-  dependent PR, and getting it back means restoring the branch by hand.
-- **CI must be green on macOS and Linux** before merge. `clippy -D warnings` and
-  `cargo fmt --check` are part of it.
-- If you found something out of scope on the way, say so in the PR rather than
-  fixing it quietly. Half the defects worth reporting in this project were found
-  while looking for something else.
-- **Report coverage honestly.** If your change leaves a case unhandled, name it —
-  in the README table, in `init`'s output, wherever a user would otherwise
-  conclude from an absence that they are protected. A user who believes a server
-  is behind the firewall when it is not is worse off than a user with no
-  firewall at all.
+The documentation is available in English and French:
+[README.md](README.md) and [README.fr.md](README.fr.md).
+
+To contribute another language:
+
+1. **Copy `README.md`** to `README.<code>.md`, using the ISO 639-1 code
+   (`README.de.md`, `README.es.md`, …).
+2. **Translate it rather than transliterating it.** A word-for-word calque of
+   English prose reads like a machine, and the point of this document is to be
+   read by someone deciding whether to trust the tool.
+3. **Add your language to the header line** of every existing README, so the
+   versions all point at each other.
+4. **Leave the code, the log output and the policy examples in English.** They
+   are what the program actually prints; translating them would send a reader
+   looking for a string that does not exist.
+5. Open a pull request following the guidelines above.
+
+Incomplete translations will not be merged: a half-translated page is worse
+than one honest link to the English original.
 
 ## Reporting a security issue
 
-If you have found a way past mcpwall, please open an issue — this is a local,
+If you have found a way past mcpwall, please open an issue. This is a local,
 single-user tool with no deployed service behind it, so there is no embargo to
-respect and a public description helps whoever reads the rules next.
-
-What is most useful: the call that got through, the policy in force, and which
-transport it used.
+respect, and a public description helps whoever reads the rules next.
 
 ## Licence
 
-MIT. By contributing, you agree your contribution is licensed under it.
+MIT. By contributing, you agree that your contribution is licensed under it.
 
 ## Contributors
 
